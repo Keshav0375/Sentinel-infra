@@ -23,7 +23,7 @@
 terraform {
   backend "azurerm" {
     resource_group_name  = "sentinel-state-rg"
-    storage_account_name = "sentineltfstate"
+    storage_account_name = "sentineltfstate0375"
     container_name       = "tfstate"
     key                  = "sentinel.terraform.tfstate"
 
