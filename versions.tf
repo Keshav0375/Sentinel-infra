@@ -6,11 +6,16 @@
 # `subscription_id` mandatory on the provider, which is what gives the root a
 # single, explicit source for the subscription instead of ambient ARM_* env.
 #
-# There is NO `azuread` provider. rev-9 moved the identity plane onto Azure RBAC
-# primitives (user-assigned managed identity + federated credentials) because the
-# subscription lives in the uwindsor.ca tenant, where directory writes are denied
-# at tenant policy. Nothing in phases 1-2 touches a directory object. If R4 is
-# resolved in favour of an app registration, azuread gets added back here.
+# There is NO `azuread` provider — in phases 1-2. rev-9 moved the identity plane
+# onto Azure RBAC primitives (user-assigned managed identity + federated
+# credentials) because the subscription lives in the uwindsor.ca tenant, where
+# directory writes are denied at tenant policy. Nothing here touches a directory
+# object.
+#
+# It returns at phase 3 task 3.5 as `azuread ~> 3.0`, aliased to a SECOND,
+# personally-owned tenant that holds the two backend-API app registrations and
+# nothing else (R4, resolved 2026-08-15). It is not added now because an unused
+# provider is dead weight the lock file would still pin.
 # ─────────────────────────────────────────────────────────────────────────────
 
 terraform {
