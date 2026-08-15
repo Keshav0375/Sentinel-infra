@@ -216,3 +216,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ── Terraform ────────────────────────────────────────────────────────────────
+# Provider plugins and lock-adjacent working dirs.
+.terraform/
+.terraform.lock.hcl.bak
+
+# State must never reach git: it holds resource IDs and, for some providers,
+# secret values in plaintext. Remote state lives in Azure Storage (backend.tf).
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Real variable values — the .example file is the committed template.
+terraform.tfvars
+*.auto.tfvars
+
+# Saved plans can embed variable values, including sensitive ones.
+*.tfplan
+crash.log
+crash.*.log
