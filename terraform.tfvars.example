@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+#
+# In CI none of this file is used: ci_infra*.yml pass every value as -var, sourced
+# from GitHub repo *variables* plus the single GH_PAT *secret* (infra.md §9).
+
+subscription_id = "174e25ca-ab82-4671-a913-9c2f66e5924d"
+
+# R3, resolved 2026-08-15. Quota verified in this region: Basv2 family limit 10,
+# Total Regional vCPUs limit 6 — enough for the single-node scale-to-zero AKS.
+location = "canadacentral"
+
+resource_group_name = "sentinel-rg"
+
+# az ad signed-in-user show --query "{id:id, upn:userPrincipalName}"
+postgres_entra_admin_object_id      = "00000000-0000-0000-0000-000000000000"
+postgres_entra_admin_principal_name = "you@uwindsor.ca"
+
+github_owner = "Keshav0375"
+
+# GitHub PAT, `repo` scope. Never commit the real value — terraform.tfvars is
+# gitignored precisely so this line stays a placeholder in git.
+github_pat = "ghp_replace_me"
