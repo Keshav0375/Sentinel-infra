@@ -132,14 +132,44 @@ together — it is the real acceptance test for step 2.
 
 ## Step 4 — OIDC identity
 
-See `scripts/bootstrap-oidc.sh` — **task 1.3, not yet implemented.** It creates the
-`sentinel-gha` user-assigned managed identity, its two role assignments, and the first two
-federated credentials, then prints the five `terraform import` commands.
+```bash
+bash scripts/bootstrap-oidc.sh
+```
+
+Idempotent. Creates the `sentinel-gha` user-assigned managed identity, its two role
+assignments, and the first two federated credentials, then prints the five
+`terraform import` commands. Run those, then `terraform apply` creates the remaining three
+credentials.
 
 > The CI identity is a **managed identity**, not an app registration. The subscription lives
 > in the `uwindsor.ca` tenant, where `allowedToCreateApps` is `false` at tenant policy — no
 > app registration can be created. A UAMI is an ordinary Azure resource governed by RBAC and
 > carries federated credentials identically; `azure/login@v2` cannot tell them apart.
+
+### Two traps in the import step
+
+Both of these were hit for real, and both produce errors that point away from the cause.
+
+**Run the imports in PowerShell, or `export MSYS_NO_PATHCONV=1` first.** MSYS rewrites
+`/subscriptions/...` into `C:/Program Files/Git/subscriptions/...` for **any** command —
+`terraform` included, not just `az`. The failure reads as a malformed resource ID.
+
+**Resource-ID casing is significant.** `az identity show --query id` returns the id with
+`resourcegroups` (lowercase g); the azurerm provider's parser is case-sensitive and rejects
+it with *"the segment at position 0 didn't match"*. Use **`resourceGroups`**. The script
+builds the id by hand for exactly this reason — don't substitute what `az` printed.
+
+**Expected result:** `terraform plan` after the imports shows **no destroy, no replace** —
+only the 3 remaining federated credentials to add.
+
+### Why `skip_service_principal_aad_check` is absent
+
+That flag guards the `PrincipalNotFound` race when Terraform creates a role assignment
+against a service principal that hasn't finished replicating. These two assignments are
+always created by the bootstrap script and only *imported*, so the race cannot occur — and
+the flag is create-only, so setting it on an imported assignment plans as an in-place update
+that fails with `doesn't support update`. Phase 2/3 assignments do create against fresh
+identities and should set it.
 
 ## Step 5 — GitHub configuration
 

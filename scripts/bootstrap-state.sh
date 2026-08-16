@@ -38,6 +38,18 @@ SUB_NAME=$(az account show --query name -o tsv)
 log "subscription: $SUB_NAME ($SUB_ID)"
 log "region:       $LOCATION"
 
+# Sentinel spans TWO tenants (school = resources, personal = the backend-API app
+# registrations, §4.4). `az` keeps ONE shared context in ~/.azure, so logging
+# into the identity tenant in any other terminal silently repoints this one.
+EXPECTED_SUB="${EXPECTED_SUB:-174e25ca-ab82-4671-a913-9c2f66e5924d}"
+if [ "$SUB_ID" != "$EXPECTED_SUB" ]; then
+  die "Wrong subscription context.
+    expected: $EXPECTED_SUB  (Azure for Students, school tenant)
+    actual:   $SUB_ID
+    Fix with: az account set --subscription $EXPECTED_SUB
+    Override deliberately with: EXPECTED_SUB=<id> $0"
+fi
+
 # ── Resource group ───────────────────────────────────────────────────────────
 # Deliberately NOT sentinel-rg. State lives in its own group so that
 # ci_destroy_infra's `terraform destroy` + `az group delete` on sentinel-rg
