@@ -75,7 +75,11 @@ check. It creates:
 | Container | `tfstate` | created with `--auth-mode login`, i.e. via Entra |
 | Role assignment | `Storage Blob Data Contributor` → you | see below |
 
-Override any name with env vars: `STATE_SA=othername bash scripts/bootstrap-state.sh`.
+> **The env vars are for recovery, not renaming.** `STATE_SA=othername` changes what the
+> *script* creates, but `backend.tf` and `oidc.tf` cannot read env vars and still point at
+> the old name — you would get state storage Terraform cannot reach. A real rename means
+> changing all six places the script lists. Same applies to `RG`/`UAMI`/`LOCATION`/`OWNER`
+> in `bootstrap-oidc.sh`.
 
 ### Why state lives in its own resource group
 

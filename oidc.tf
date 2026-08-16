@@ -13,11 +13,13 @@
 # identity.tf at phase 3 task 3.5 — do not mix them into this file.
 #
 # The five credentials below are written out explicitly rather than with
-# for_each. They are uniform enough that for_each is tempting, but each one is
-# imported by hand at the bootstrap seam (§4.3.1), and
+# for_each. They are uniform enough that for_each is tempting, but the two
+# Sentinel-infra ones are IMPORTED BY HAND at the bootstrap seam (§4.3.1) — the
+# other three Terraform creates itself — and
 # `azurerm_federated_identity_credential.gha["sentinel_infra_main"]` needs shell
 # quoting that breaks differently in bash and PowerShell. Explicit addresses keep
-# the one manual step in this repo hard to get wrong.
+# the one manual step in this repo hard to get wrong; that is worth more than
+# saving twenty lines.
 # ─────────────────────────────────────────────────────────────────────────────
 
 locals {
@@ -82,7 +84,7 @@ resource "azurerm_federated_identity_credential" "sentinel_infra_main" {
   user_assigned_identity_id = azurerm_user_assigned_identity.sentinel_gha.id
   audience                  = local.entra_audience
   issuer                    = local.github_oidc_issuer
-  subject                   = "repo:Keshav0375/Sentinel-infra:ref:refs/heads/main"
+  subject                   = "repo:${var.github_owner}/Sentinel-infra:ref:refs/heads/main"
 }
 
 resource "azurerm_federated_identity_credential" "sentinel_infra_pr" {
@@ -90,7 +92,7 @@ resource "azurerm_federated_identity_credential" "sentinel_infra_pr" {
   user_assigned_identity_id = azurerm_user_assigned_identity.sentinel_gha.id
   audience                  = local.entra_audience
   issuer                    = local.github_oidc_issuer
-  subject                   = "repo:Keshav0375/Sentinel-infra:pull_request"
+  subject                   = "repo:${var.github_owner}/Sentinel-infra:pull_request"
 }
 
 resource "azurerm_federated_identity_credential" "sentinel_main" {
@@ -98,7 +100,7 @@ resource "azurerm_federated_identity_credential" "sentinel_main" {
   user_assigned_identity_id = azurerm_user_assigned_identity.sentinel_gha.id
   audience                  = local.entra_audience
   issuer                    = local.github_oidc_issuer
-  subject                   = "repo:Keshav0375/Sentinel:ref:refs/heads/main"
+  subject                   = "repo:${var.github_owner}/Sentinel:ref:refs/heads/main"
 }
 
 resource "azurerm_federated_identity_credential" "sentinel_pr" {
@@ -106,7 +108,7 @@ resource "azurerm_federated_identity_credential" "sentinel_pr" {
   user_assigned_identity_id = azurerm_user_assigned_identity.sentinel_gha.id
   audience                  = local.entra_audience
   issuer                    = local.github_oidc_issuer
-  subject                   = "repo:Keshav0375/Sentinel:pull_request"
+  subject                   = "repo:${var.github_owner}/Sentinel:pull_request"
 }
 
 resource "azurerm_federated_identity_credential" "sentinel_deployment_main" {
@@ -114,5 +116,5 @@ resource "azurerm_federated_identity_credential" "sentinel_deployment_main" {
   user_assigned_identity_id = azurerm_user_assigned_identity.sentinel_gha.id
   audience                  = local.entra_audience
   issuer                    = local.github_oidc_issuer
-  subject                   = "repo:Keshav0375/Sentinel-deployment:ref:refs/heads/main"
+  subject                   = "repo:${var.github_owner}/Sentinel-deployment:ref:refs/heads/main"
 }

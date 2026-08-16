@@ -15,7 +15,7 @@ variable "subscription_id" {
   type        = string
 
   validation {
-    condition     = can(regex("^[0-9a-fA-F-]{36}$", var.subscription_id))
+    condition     = can(regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", var.subscription_id))
     error_message = "subscription_id must be a 36-character GUID."
   }
 }
@@ -45,7 +45,7 @@ variable "postgres_entra_admin_object_id" {
   type        = string
 
   validation {
-    condition     = can(regex("^[0-9a-fA-F-]{36}$", var.postgres_entra_admin_object_id))
+    condition     = can(regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", var.postgres_entra_admin_object_id))
     error_message = "postgres_entra_admin_object_id must be a 36-character GUID (an object ID, not a UPN)."
   }
 }
@@ -62,7 +62,7 @@ variable "github_owner" {
 
   validation {
     condition     = var.github_owner == "Keshav0375"
-    error_message = "github_owner must be exactly 'Keshav0375'. Azure matches OIDC subject claims case-sensitively, so 'keshav0375' or the old placeholder 'keshxvDev' silently break every azure/login."
+    error_message = "github_owner must be exactly 'Keshav0375'. It is interpolated into all five federated-credential subjects, and Azure matches those case-sensitively — so 'keshav0375' or the old placeholder 'keshxvDev' would produce a login that fails with no diff to inspect. This guard is a typo catcher, not a policy: to genuinely change owner, update it here and in docs/BOOTSTRAP.md together."
   }
 }
 

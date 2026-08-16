@@ -70,6 +70,15 @@ else
   # The name is global across all of Azure, so "taken" and "yours" are different
   # failures and must not be conflated.
   if [ "$(az storage account check-name --name "$STATE_SA" --query nameAvailable -o tsv)" = "false" ]; then
+    # check-name is GLOBAL: it also returns false for accounts in THIS subscription.
+    # Distinguish before accusing another tenant — the remediation differs completely.
+    MINE_IN_RG=$(az storage account list --query "[?name=='$STATE_SA'].resourceGroup" -o tsv)
+    if [ -n "$MINE_IN_RG" ]; then
+      die "Storage account '$STATE_SA' already exists in YOUR subscription, but in
+    resource group '$MINE_IN_RG' rather than '$STATE_RG'.
+    Do NOT rename anything. Either re-run with STATE_RG=$MINE_IN_RG, or delete the
+    stray account if it was a mistake."
+    fi
     die "Storage account name '$STATE_SA' is taken by another Azure tenant.
     Pick a new name and change it in ALL of these together, in one commit:
       - backend.tf                        (storage_account_name)
@@ -98,22 +107,29 @@ SA_ID=$(az storage account show --name "$STATE_SA" --resource-group "$STATE_RG" 
 # CONTROL-plane role and grants no blob access whatsoever — without this
 # assignment `terraform init` fails with a 403 that reads like a broken backend.
 step "Granting the operator blob data access"
-if OPERATOR_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null); then
+PRINCIPAL_TYPE="${OPERATOR_PRINCIPAL_TYPE:-User}"
+if [ -n "${OPERATOR_OBJECT_ID:-}" ]; then
+  OPERATOR_ID="$OPERATOR_OBJECT_ID"
+elif OPERATOR_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null); then
   PRINCIPAL_TYPE=User
 else
-  # Running as a service principal (CI). Fall back to the logged-in SP.
-  OPERATOR_ID=$(az account show --query user.name -o tsv)
-  OPERATOR_ID=$(az ad sp show --id "$OPERATOR_ID" --query id -o tsv 2>/dev/null) \
-    || die "Could not resolve the current principal's object id."
-  PRINCIPAL_TYPE=ServicePrincipal
+  # Reached only when Graph is unavailable to this principal — which is precisely
+  # why a fallback making MORE Graph calls (az ad sp show) cannot work. Ask instead
+  # of dying with no remediation.
+  die "Could not resolve the current principal's object id via Microsoft Graph.
+    Expected when running as a service principal in a tenant that restricts
+    directory reads. Supply it explicitly:
+      OPERATOR_OBJECT_ID=<object-id> OPERATOR_PRINCIPAL_TYPE=ServicePrincipal $0"
 fi
 log "principal: $OPERATOR_ID ($PRINCIPAL_TYPE)"
 
-# --assignee-object-id + --assignee-principal-type skip the Microsoft Graph
-# lookup that plain --assignee performs. In a tenant where directory reads are
-# restricted, that lookup is what fails — not the assignment itself.
-if az role assignment list --assignee "$OPERATOR_ID" --scope "$SA_ID" \
-     --role "Storage Blob Data Contributor" --query "[0].id" -o tsv 2>/dev/null | grep -q .; then
+# `create` uses --assignee-object-id + --assignee-principal-type, which skip the
+# Microsoft Graph lookup plain --assignee performs. `list` has no such flag, so it
+# filters locally instead — same reason: this design must not depend on Graph.
+EXISTING_ROLE=$(az role assignment list --scope "$SA_ID" \
+  --query "[?principalId=='$OPERATOR_ID' && roleDefinitionName=='Storage Blob Data Contributor'].id | [0]" \
+  -o tsv 2>/dev/null || true)
+if [ -n "$EXISTING_ROLE" ] && [ "$EXISTING_ROLE" != "None" ]; then
   log "already assigned — skipping"
 else
   az role assignment create \
@@ -137,14 +153,23 @@ if az storage container show --name "$STATE_CONTAINER" --account-name "$STATE_SA
   log "already exists — skipping"
 else
   for attempt in 1 2 3 4 5 6 7 8; do
-    if az storage container create --name "$STATE_CONTAINER" --account-name "$STATE_SA" \
-         --auth-mode login --output none 2>/dev/null; then
+    if OUT=$(az storage container create --name "$STATE_CONTAINER" --account-name "$STATE_SA" \
+               --auth-mode login --output none 2>&1); then
       log "created"
       break
     fi
-    [ "$attempt" -eq 8 ] && die "Container creation still failing after ~2min.
-    Almost always RBAC propagation. Wait a minute and re-run — this script is idempotent."
-    log "waiting for RBAC propagation (attempt $attempt/8)..."
+    # if/then/fi, not `[ ] && die` — the latter is only safe under `set -e` because
+    # other statements follow it in the loop body, and a later reordering would
+    # silently disarm it.
+    if [ "$attempt" -eq 8 ]; then
+      # Never assert "probably propagation" while hiding the response. If the real
+      # cause is AuthorizationPermissionMismatch, re-running can never succeed and
+      # the operator needs to see that rather than waiting two more minutes.
+      die "Container creation still failing after ~2 min. Last error from az:
+
+$OUT"
+    fi
+    log "retrying, likely RBAC propagation ($attempt/8)..."
     sleep 15
   done
 fi
@@ -159,5 +184,5 @@ cat <<EOF
     container_name       = "$STATE_CONTAINER"
     key                  = "sentinel.terraform.tfstate"
 
-Next: terraform init   (drops -backend=false — this is the real one)
+Next: terraform init   (configures the real backend against this container)
 EOF
