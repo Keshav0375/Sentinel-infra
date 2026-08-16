@@ -36,11 +36,18 @@ log()  { printf '  %s\n' "$*"; }
 step() { printf '\n▶ %s\n' "$*"; }
 die()  { printf '\n✖ %s\n' "$*" >&2; exit 1; }
 
+# az on Windows emits CRLF. `$(...)` strips the trailing newline but NOT the \r,
+# so every captured value silently carries a trailing carriage return. That makes
+# string comparisons fail against clean literals, and corrupts any id pasted into
+# another command — including the terraform import lines this script prints.
+# Always capture through this.
+azq() { az "$@" -o tsv 2>/dev/null | tr -d '\r'; }
+
 command -v az >/dev/null 2>&1 || die "az CLI not found on PATH."
 
 step "Checking Azure login"
-SUB_ID=$(az account show --query id -o tsv 2>/dev/null) || die "Not logged in. Run: az login"
-log "subscription: $(az account show --query name -o tsv) ($SUB_ID)"
+SUB_ID=$(azq account show --query id 2>/dev/null) || die "Not logged in. Run: az login"
+log "subscription: $(azq account show --query name) ($SUB_ID)"
 
 # Sentinel spans TWO tenants (school = resources, personal = the backend-API app
 # registrations, §4.4). `az` keeps ONE shared context in ~/.azure, so logging
@@ -70,9 +77,14 @@ else
   log "created"
 fi
 
-# One round trip, not three.
-read -r CLIENT_ID PRINCIPAL_ID ACTUAL_LOCATION <<<"$(az identity show --name "$UAMI" \
-  --resource-group "$RG" --query "[clientId,principalId,location]" -o tsv)"
+# One round trip, not three. `-o tsv` over a JMESPath list emits one value PER
+# LINE (not tab-separated), so this reads three lines rather than three fields.
+{
+  read -r CLIENT_ID
+  read -r PRINCIPAL_ID
+  read -r ACTUAL_LOCATION
+} < <(azq identity show --name "$UAMI" --resource-group "$RG" \
+  --query "[clientId,principalId,location]")
 
 # `location` is ForceNew on azurerm_user_assigned_identity. A mismatch between
 # this script and var.location plans a REPLACE of the identity CI authenticates
@@ -153,9 +165,29 @@ assign_role "Storage Blob Data Contributor" \
   "Storage Blob Data Contributor on $STATE_SA"
 BLOB_ID="$ROLE_ASSIGNMENT_ID"
 
+# R5: Contributor cannot create role assignments (notActions include
+# Microsoft.Authorization/*/Write). Phases 2-3 declare six Terraform-managed
+# assignments, so CI needs this or its first apply fails with AuthorizationFailed.
+# Must be bootstrap-created: an identity cannot grant itself the right to grant.
+#
+# The built-in RBAC Administrator role forbids assigning Owner / User Access
+# Administrator / itself, so this does not let CI escalate its own privileges.
+assign_role "Role Based Access Control Administrator" \
+  "/subscriptions/$SUB_ID/resourceGroups/$RG" \
+  "RBAC Administrator on $RG"
+RBAC_ADMIN_ID="$ROLE_ASSIGNMENT_ID"
+
+# ci_destroy_infra ends with `az group delete sentinel-state-rg`; the blob grant
+# above covers data inside the account, not the group itself.
+assign_role "Contributor" "/subscriptions/$SUB_ID/resourceGroups/$STATE_RG" \
+  "Contributor on $STATE_RG"
+STATE_RG_ID="$ROLE_ASSIGNMENT_ID"
+
 # Belt and braces: never print an import command with an empty id.
-[ -n "$CONTRIB_ID" ] || die "Could not resolve the Contributor assignment id."
-[ -n "$BLOB_ID" ]    || die "Could not resolve the Storage Blob Data Contributor assignment id."
+[ -n "$CONTRIB_ID" ]    || die "Could not resolve the Contributor assignment id."
+[ -n "$BLOB_ID" ]       || die "Could not resolve the Storage Blob Data Contributor assignment id."
+[ -n "$RBAC_ADMIN_ID" ] || die "Could not resolve the RBAC Administrator assignment id."
+[ -n "$STATE_RG_ID" ]   || die "Could not resolve the state-RG Contributor assignment id."
 
 # ── Federated credentials ────────────────────────────────────────────────────
 # Only the two Sentinel-infra credentials are created here — just enough for
@@ -193,13 +225,13 @@ add_fedcred "sentinel-infra-main" "repo:$OWNER/Sentinel-infra:ref:refs/heads/mai
 add_fedcred "sentinel-infra-pr" "repo:$OWNER/Sentinel-infra:pull_request"
 
 # ── Import commands ──────────────────────────────────────────────────────────
-# All five objects this script created, not just the identity. Importing only the
-# UAMI leaves four to collide on the first apply. Managed-identity resources
+# All seven objects this script created, not just the identity. Importing only
+# the UAMI leaves six to collide on the first apply. Managed-identity resources
 # import by Azure resource ID, which is derivable — one practical advantage over
 # app registrations, whose import id is an opaque directory object id.
 cat <<EOF
 
-✔ Bootstrap complete. Now import the five objects created above.
+✔ Bootstrap complete. Now import the seven objects created above.
 
   ⚠ Run these in PowerShell, or export MSYS_NO_PATHCONV=1 first in Git Bash.
     MSYS rewrites /subscriptions/... into C:/Program Files/Git/subscriptions/...
@@ -219,6 +251,12 @@ terraform import azurerm_role_assignment.gha_contributor \\
 
 terraform import azurerm_role_assignment.gha_state_blob \\
   "$BLOB_ID"
+
+terraform import azurerm_role_assignment.gha_rbac_admin \\
+  "$RBAC_ADMIN_ID"
+
+terraform import azurerm_role_assignment.gha_state_rg_contributor \\
+  "$STATE_RG_ID"
 
 Then: terraform plan
 

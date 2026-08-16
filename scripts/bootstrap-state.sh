@@ -31,10 +31,10 @@ die()  { printf '\n✖ %s\n' "$*" >&2; exit 1; }
 command -v az >/dev/null 2>&1 || die "az CLI not found on PATH."
 
 step "Checking Azure login"
-if ! SUB_ID=$(az account show --query id -o tsv 2>/dev/null); then
+if ! SUB_ID=$(azq account show --query id 2>/dev/null); then
   die "Not logged in. Run: az login"
 fi
-SUB_NAME=$(az account show --query name -o tsv)
+SUB_NAME=$(azq account show --query name)
 log "subscription: $SUB_NAME ($SUB_ID)"
 log "region:       $LOCATION"
 
@@ -69,10 +69,10 @@ if az storage account show --name "$STATE_SA" --resource-group "$STATE_RG" --out
 else
   # The name is global across all of Azure, so "taken" and "yours" are different
   # failures and must not be conflated.
-  if [ "$(az storage account check-name --name "$STATE_SA" --query nameAvailable -o tsv)" = "false" ]; then
+  if [ "$(azq storage account check-name --name "$STATE_SA" --query nameAvailable)" = "false" ]; then
     # check-name is GLOBAL: it also returns false for accounts in THIS subscription.
     # Distinguish before accusing another tenant — the remediation differs completely.
-    MINE_IN_RG=$(az storage account list --query "[?name=='$STATE_SA'].resourceGroup" -o tsv)
+    MINE_IN_RG=$(azq storage account list --query "[?name=='$STATE_SA'].resourceGroup")
     if [ -n "$MINE_IN_RG" ]; then
       die "Storage account '$STATE_SA' already exists in YOUR subscription, but in
     resource group '$MINE_IN_RG' rather than '$STATE_RG'.
@@ -99,7 +99,7 @@ else
   log "created"
 fi
 
-SA_ID=$(az storage account show --name "$STATE_SA" --resource-group "$STATE_RG" --query id -o tsv)
+SA_ID=$(azq storage account show --name "$STATE_SA" --resource-group "$STATE_RG" --query id)
 
 # ── Data-plane RBAC ──────────────────────────────────────────────────────────
 # backend.tf sets use_azuread_auth, so Terraform reaches the state blob with an
@@ -110,7 +110,7 @@ step "Granting the operator blob data access"
 PRINCIPAL_TYPE="${OPERATOR_PRINCIPAL_TYPE:-User}"
 if [ -n "${OPERATOR_OBJECT_ID:-}" ]; then
   OPERATOR_ID="$OPERATOR_OBJECT_ID"
-elif OPERATOR_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null); then
+elif OPERATOR_ID=$(azq ad signed-in-user show --query id 2>/dev/null); then
   PRINCIPAL_TYPE=User
 else
   # Reached only when Graph is unavailable to this principal — which is precisely

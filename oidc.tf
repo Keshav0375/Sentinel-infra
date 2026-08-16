@@ -69,6 +69,43 @@ resource "azurerm_role_assignment" "gha_state_blob" {
   principal_id         = azurerm_user_assigned_identity.sentinel_gha.principal_id
 }
 
+# R5 (2026-08-15). Contributor CANNOT create role assignments — its notActions
+# include Microsoft.Authorization/*/Write and /Delete. Phases 2-3 declare six
+# Terraform-managed assignments (Key Vault Secrets Officer/User, AcrPull, AKS
+# Cluster User), so without this the first CI apply that touches any of them dies
+# with AuthorizationFailed, and ci_destroy_infra cannot tear them down either.
+#
+# Phase 1 never caught this because every apply so far ran locally as subscription
+# Owner. CI has not exercised this identity once.
+#
+# "Role Based Access Control Administrator" rather than Owner or User Access
+# Administrator: its built-in definition carries an ABAC condition forbidding the
+# assignment of Owner, User Access Administrator and RBAC Administrator itself.
+# The identity can therefore grant the roles the modules need but cannot escalate
+# its own privileges — which matters because these credentials are reachable from
+# pull_request-triggered workflows on a public repo.
+resource "azurerm_role_assignment" "gha_rbac_admin" {
+  scope                = data.azurerm_resource_group.sentinel.id
+  role_definition_name = "Role Based Access Control Administrator"
+  principal_id         = azurerm_user_assigned_identity.sentinel_gha.principal_id
+}
+
+# ci_destroy_infra (§7.3) finishes with `az group delete --name sentinel-state-rg`.
+# The data-plane grant above covers blobs inside the account and nothing else, so
+# the delete would fail — silently, since §7.3 masks it with `|| true` — leaving
+# the state account behind on every teardown.
+#
+# TENSION, accepted knowingly: this hands CI the ability to delete the very state
+# that protects it, which is exactly what putting state in its own resource group
+# was meant to guard against. The isolation still holds for the case that matters
+# — `terraform destroy` cannot delete the state describing the run in progress —
+# but the "everything, always" teardown is a deliberate, separate, final step.
+resource "azurerm_role_assignment" "gha_state_rg_contributor" {
+  scope                = "/subscriptions/${var.subscription_id}/resourceGroups/sentinel-state-rg"
+  role_definition_name = "Contributor"
+  principal_id         = azurerm_user_assigned_identity.sentinel_gha.principal_id
+}
+
 # ── Federated credentials ─────────────────────────────────────────────────────
 # Children of the UAMI, so plain Azure resources under RBAC rather than directory
 # objects. A managed identity accepts up to 20; we use 5.
