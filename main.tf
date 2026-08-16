@@ -34,8 +34,14 @@ data "azurerm_resource_group" "sentinel" {
   name = var.resource_group_name
 }
 
-# ── Module wiring — added in later phases, listed here as the build order ─────
-# module "acr"         {}  # phase 2 · task 2.1
+# ── Module wiring ─────────────────────────────────────────────────────────────
+
+module "acr" {
+  source              = "./modules/acr"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+}
+
 # module "postgresql"  {}  # phase 2 · task 2.2  (Entra-only auth)
 # module "keyvault"    {}  # phase 2 · task 2.3
 # module "aks"         {}  # phase 3 · task 3.1  (workload identity)
