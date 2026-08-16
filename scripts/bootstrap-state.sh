@@ -28,6 +28,12 @@ log()  { printf '  %s\n' "$*"; }
 step() { printf '\n▶ %s\n' "$*"; }
 die()  { printf '\n✖ %s\n' "$*" >&2; exit 1; }
 
+# az on Windows emits CRLF. `$(...)` strips the trailing newline but NOT the \r,
+# so every captured value silently carries a trailing carriage return — which
+# breaks comparison against clean literals and corrupts any id passed onward.
+# Always capture through this.
+azq() { az "$@" -o tsv 2>/dev/null | tr -d '\r'; }
+
 command -v az >/dev/null 2>&1 || die "az CLI not found on PATH."
 
 step "Checking Azure login"

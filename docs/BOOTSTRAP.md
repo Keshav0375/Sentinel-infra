@@ -3,11 +3,23 @@
 Everything in this repo is Terraform **except** the two things Terraform cannot create for
 itself. This document covers those, in order, and nothing else.
 
-> **Run these in PowerShell, not Git Bash.** MSYS2 rewrites anything shaped like a Unix path
-> into a Windows path, so `--scope /subscriptions/...` silently becomes
-> `C:/Program Files/subscriptions/...` and fails with a confusing error. The `.sh` scripts
-> here set `MSYS_NO_PATHCONV=1` themselves, so running *those* from Git Bash is fine — it is
-> hand-typed `az` commands that break.
+> **Run hand-typed `az` and `terraform` commands in PowerShell.** MSYS2 rewrites anything
+> shaped like a Unix path into a Windows path, so `--scope /subscriptions/...` silently
+> becomes `C:/Program Files/Git/subscriptions/...` and fails confusingly. This affects
+> `terraform import` too, not just `az`.
+>
+> **The `.sh` scripts set `MSYS_NO_PATHCONV=1` themselves**, so they are safe either way —
+> but invoking them *from* PowerShell needs the full path to Git Bash, because bare `bash`
+> in PowerShell resolves to `C:\Windows\system32\bash.exe`, the **WSL** launcher, and
+> fails with `execvpe(/bin/bash) failed: No such file or directory` if no distro is
+> installed:
+>
+> ```powershell
+> $bash = "C:\Program Files\Git\bin\bash.exe"
+> & $bash scripts/bootstrap-state.sh
+> ```
+>
+> Note PowerShell 5.1 has no `&&` operator — chain with `;` or use separate lines.
 
 ## Why any of this is manual
 
@@ -61,8 +73,8 @@ Registration is idempotent and takes a minute or two to settle.
 
 ## Step 2 — Terraform state storage
 
-```bash
-bash scripts/bootstrap-state.sh
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" scripts/bootstrap-state.sh
 ```
 
 Idempotent — re-running it is a no-op, so it doubles as a "is my state storage healthy?"
@@ -136,8 +148,8 @@ together — it is the real acceptance test for step 2.
 
 ## Step 4 — OIDC identity
 
-```bash
-bash scripts/bootstrap-oidc.sh
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" scripts/bootstrap-oidc.sh
 ```
 
 Idempotent. Creates the `sentinel-gha` user-assigned managed identity, its two role
