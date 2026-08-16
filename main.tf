@@ -19,10 +19,13 @@ provider "github" {
   owner = var.github_owner
 }
 
-# The identity currently running Terraform: `az login` locally, the sentinel-gha
-# user-assigned managed identity via OIDC in CI. Modules read tenant_id from here
-# rather than taking it as another input.
-data "azurerm_client_config" "current" {}
+# NOTE: there is deliberately no root-level `data "azurerm_client_config"`.
+# Data sources do not inherit across module boundaries, so each module that needs
+# tenant_id declares its own (see modules/postgresql, modules/keyvault). A root
+# copy was carried through phase 1 and never referenced — tflint flagged it as
+# dead, correctly, so it was removed rather than kept on the promise of a later
+# consumer. If task 4.1 needs it for the AZURE_TENANT_ID distribution, it is one
+# block to add back.
 
 # READ, never own (conflict C1). sentinel-rg is created out of band by the
 # one-time bootstrap (infra.md §10 step 1) and deleted by ci_destroy_infra's
@@ -42,7 +45,19 @@ module "acr" {
   location            = var.location
 }
 
-# module "postgresql"  {}  # phase 2 · task 2.2  (Entra-only auth)
+module "postgresql" {
+  source              = "./modules/postgresql"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+
+  postgres_entra_admin_object_id      = var.postgres_entra_admin_object_id
+  postgres_entra_admin_principal_name = var.postgres_entra_admin_principal_name
+
+  # backend_uami_principal_id is deliberately not passed — it defaults to null
+  # and the second Entra administrator stays count-guarded to 0 until phase 3
+  # task 3.1 creates the backend UAMI.
+}
+
 # module "keyvault"    {}  # phase 2 · task 2.3
 # module "aks"         {}  # phase 3 · task 3.1  (workload identity)
 # module "event_grid"  {}  # phase 3 · task 3.2
