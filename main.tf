@@ -87,7 +87,11 @@ module "keyvault" {
   enable_bridge_reader = true
   bridge_principal_id  = module.functions.bridge_principal_id
 
-  # enable_rotator_officer stays false until task 3.6 creates the rotator.
+  # Flipped by task 3.6: the rotator is the vault's only non-human WRITE
+  # principal, and the SecretNearExpiry wiring rides the same toggle.
+  enable_rotator_officer = true
+  rotator_principal_id   = module.functions.rotator_principal_id
+  rotator_app_id         = module.functions.rotator_app_id
 }
 module "aks" {
   source              = "./modules/aks"
@@ -111,6 +115,7 @@ module "functions" {
   location             = var.location
   storage_account_name = var.functions_storage_name
   bridge_name          = var.bridge_name
+  rotator_name         = var.rotator_name
   key_vault_name       = var.key_vault_name
 }
 module "app_service" {

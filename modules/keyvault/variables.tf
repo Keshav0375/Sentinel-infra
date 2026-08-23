@@ -98,3 +98,9 @@ variable "rotator_principal_id" {
     error_message = "enable_rotator_officer is true, so rotator_principal_id must be set (phase 3 task 3.6 supplies it)."
   }
 }
+
+variable "rotator_app_id" {
+  description = "Rotator function app resource id, for the SecretNearExpiry subscription endpoint. Required when enable_rotator_officer is true."
+  type        = string
+  default     = null
+}

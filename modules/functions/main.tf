@@ -90,3 +90,50 @@ resource "azurerm_linux_function_app" "bridge" {
 
   zip_deploy_file = data.archive_file.bridge.output_path
 }
+
+# ── Rotator (task 3.6) ────────────────────────────────────────────────────────
+data "archive_file" "rotator" {
+  type        = "zip"
+  source_dir  = "${path.module}/src"
+  output_path = "${path.module}/dist/rotator.zip"
+  excludes    = ["bridge"]
+}
+
+# Second app on the same Y1 plan. SystemAssigned: this identity is the only
+# WRITE principal on the vault besides the human operator (Secrets Officer via
+# enable_rotator_officer). TEAMS_WEBHOOK_URL is a Key Vault reference — Officer
+# includes read, so it resolves through the same grant.
+resource "azurerm_linux_function_app" "rotator" {
+  name                = var.rotator_name
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  service_plan_id     = azurerm_service_plan.functions.id
+
+  storage_account_name       = azurerm_storage_account.func.name
+  storage_account_access_key = azurerm_storage_account.func.primary_access_key
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  site_config {
+    application_stack {
+      python_version = "3.12"
+    }
+  }
+
+  app_settings = {
+    "KEY_VAULT_URI"     = "https://${var.key_vault_name}.vault.azure.net/"
+    "KEY_VAULT_NAME"    = var.key_vault_name
+    "TEAMS_WEBHOOK_URL" = "@Microsoft.KeyVault(VaultName=${var.key_vault_name};SecretName=teams-webhook-url)"
+    # ANTHROPIC_ADMIN_KEY is deliberately NOT configured: no admin key exists
+    # among the 9 seeded secrets, so the rotator escalates to Teams (its manual
+    # path) rather than pretending it can mint. Set it later to enable
+    # auto-rotation without any code change.
+
+    "SCM_DO_BUILD_DURING_DEPLOYMENT" = "true"
+    "ENABLE_ORYX_BUILD"              = "true"
+  }
+
+  zip_deploy_file = data.archive_file.rotator.output_path
+}

@@ -147,3 +147,40 @@ resource "azurerm_role_assignment" "rotator_kv_officer" {
   principal_id                     = var.rotator_principal_id
   skip_service_principal_aad_check = true
 }
+
+# ── Rotation wiring (task 3.6) ────────────────────────────────────────────────
+# System topic on the vault: Azure emits lifecycle events (SecretNearExpiry ~30
+# days out) with no polling. Lives here rather than in the event-grid module
+# because its lifecycle is the VAULT's — destroy the vault, the topic dies too.
+resource "azurerm_eventgrid_system_topic" "kv" {
+  count = var.enable_rotator_officer ? 1 : 0
+
+  name                = "${var.vault_name}-events"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  topic_type          = "Microsoft.KeyVault.vaults"
+
+  # NOT the deprecated `source_arm_resource_id` — fourth azurerm-v4 rename of
+  # this class (enable_rbac_authorization, parent_id, resource_group_name).
+  source_resource_id = azurerm_key_vault.sentinel.id
+}
+
+resource "azurerm_eventgrid_system_topic_event_subscription" "rotate" {
+  count = var.enable_rotator_officer ? 1 : 0
+
+  name                = "sentinel-rotate-on-near-expiry"
+  system_topic        = azurerm_eventgrid_system_topic.kv[0].name
+  resource_group_name = var.resource_group_name
+
+  # Only the near-expiry event — the topic also emits NewVersionCreated, which
+  # the rotator itself triggers: subscribing to it would loop.
+  included_event_types = ["Microsoft.KeyVault.SecretNearExpiry"]
+
+  azure_function_endpoint {
+    function_id = "${var.rotator_app_id}/functions/rotate"
+
+    # Service defaults, declared — omitting them is a perpetual diff (task 3.2).
+    max_events_per_batch              = 1
+    preferred_batch_size_in_kilobytes = 64
+  }
+}

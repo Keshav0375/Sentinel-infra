@@ -142,3 +142,32 @@ variable "event_topic_name" {
   type        = string
   default     = "sentinel-events-0375"
 }
+
+variable "rotator_name" {
+  description = "Globally unique rotator function app name."
+  type        = string
+  default     = "sentinel-rotator-0375"
+}
+
+# ── Identity tenant (R4) ──────────────────────────────────────────────────────
+variable "identity_tenant_id" {
+  description = "The personally-owned Entra tenant holding ONLY the two backend-API app registrations (R4). Not the school tenant."
+  type        = string
+  default     = "eae0d3c6-af22-4b70-ad3b-12d625a06139"
+}
+
+# Auth-mode split for the aliased azuread provider. Provider-level args, NOT
+# ARM_* env: in CI the azurerm provider reads ARM_CLIENT_ID for sentinel-gha
+# (school tenant), and env would leak the same client id into azuread — which
+# must authenticate as sentinel-tf-identity in a DIFFERENT tenant.
+variable "identity_client_id" {
+  description = "clientId of sentinel-tf-identity for CI OIDC auth to the identity tenant. Leave null locally — the guest-invited CLI login is used instead."
+  type        = string
+  default     = null
+}
+
+variable "identity_use_oidc" {
+  description = "true in CI (GitHub OIDC exchange, as sentinel-tf-identity); false locally (az CLI as the guest-invited school account)."
+  type        = bool
+  default     = false
+}

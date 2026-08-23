@@ -32,3 +32,13 @@ variable "key_vault_name" {
   description = "Vault name for the GITHUB_TOKEN Key Vault reference. From the root's var.key_vault_name — one source of truth for the globally-unique name."
   type        = string
 }
+
+variable "rotator_name" {
+  description = "Globally unique rotator function app name."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]$", var.rotator_name))
+    error_message = "rotator_name must be 2-60 chars, lowercase alphanumeric or hyphen."
+  }
+}

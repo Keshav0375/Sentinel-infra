@@ -98,8 +98,10 @@ resource "azurerm_user_assigned_identity" "backend" {
 # audience. The consumer side (SA annotation azure.workload.identity/client-id
 # + pod label azure.workload.identity/use) lives in Sentinel/azure/k8s/.
 resource "azurerm_federated_identity_credential" "backend" {
+  # No resource_group_name: unused + deprecated in azurerm v4 — the same W1
+  # finding phase 1 fixed in oidc.tf, reintroduced here by copying the original
+  # §3.7 snippet. The parent identity carries the group.
   name                      = "sentinel-backend-fic"
-  resource_group_name       = var.resource_group_name
   user_assigned_identity_id = azurerm_user_assigned_identity.backend.id
   audience                  = ["api://AzureADTokenExchange"]
   issuer                    = azurerm_kubernetes_cluster.sentinel.oidc_issuer_url
