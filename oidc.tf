@@ -166,9 +166,10 @@ data "azurerm_resource_group" "functions" {
   name = "sentinel-func-rg"
 }
 
-resource "azurerm_role_assignment" "gha_func_rg_contributor" {
-  scope                            = data.azurerm_resource_group.functions.id
-  role_definition_name             = "Contributor"
-  principal_id                     = azurerm_user_assigned_identity.sentinel_gha.principal_id
-  skip_service_principal_aad_check = true
-}
+# The CI Contributor grant on THIS resource group is deliberately NOT a
+# Terraform resource (warden blocker, 2026-08-23 — an R5-class repeat). CI's
+# RBAC Administrator is scoped to sentinel-rg only, so a Terraform-managed
+# assignment here could never be created or destroyed from CI: the first
+# rebuild's apply would die AuthorizationFailed before reaching the functions.
+# scripts/bootstrap-oidc.sh creates it idempotently instead, alongside the
+# other grants CI cannot self-manage.
