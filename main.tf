@@ -58,7 +58,18 @@ module "postgresql" {
   # task 3.1 creates the backend UAMI.
 }
 
-# module "keyvault"    {}  # phase 2 · task 2.3
+module "keyvault" {
+  source              = "./modules/keyvault"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+
+  # The UAMI's principalId, not its clientId — the role assignment needs the
+  # service principal's object id.
+  gha_principal_id = azurerm_user_assigned_identity.sentinel_gha.principal_id
+
+  # backend_uami_principal_id and rotator_principal_id default to null; their
+  # role assignments stay count-guarded to 0 until phase 3 tasks 3.1 and 3.6.
+}
 # module "aks"         {}  # phase 3 · task 3.1  (workload identity)
 # module "event_grid"  {}  # phase 3 · task 3.2
 # module "functions"   {}  # phase 3 · task 3.3  (Event Grid → GHA bridge)
