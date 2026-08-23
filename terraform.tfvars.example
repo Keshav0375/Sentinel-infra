@@ -15,6 +15,15 @@ resource_group_name = "sentinel-rg"
 postgres_entra_admin_object_id      = "00000000-0000-0000-0000-000000000000"
 postgres_entra_admin_principal_name = "you@uwindsor.ca"
 
+# The human who seeds Key Vault secrets (§10 step 7). Same principal as the
+# Postgres admin in practice, declared separately because they are different
+# concerns. REQUIRED — has no default, so CI must pass it too (§9).
+kv_admin_object_id = "00000000-0000-0000-0000-000000000000"
+
+# Pinned so an `az login` to the identity tenant in another terminal cannot
+# silently repoint the Entra admin and Key Vault to the wrong directory.
+tenant_id = "12f933b3-3d61-4b19-9a4d-689021de8cc9"
+
 github_owner = "Keshav0375"
 
 # GitHub PAT, `repo` scope. Never commit the real value — terraform.tfvars is

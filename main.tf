@@ -19,10 +19,13 @@ provider "github" {
   owner = var.github_owner
 }
 
-# The identity currently running Terraform: `az login` locally, the sentinel-gha
-# user-assigned managed identity via OIDC in CI. Modules read tenant_id from here
-# rather than taking it as another input.
-data "azurerm_client_config" "current" {}
+# NOTE: there is deliberately no root-level `data "azurerm_client_config"`.
+# Data sources do not inherit across module boundaries, so each module that needs
+# tenant_id declares its own (see modules/postgresql, modules/keyvault). A root
+# copy was carried through phase 1 and never referenced — tflint flagged it as
+# dead, correctly, so it was removed rather than kept on the promise of a later
+# consumer. If task 4.1 needs it for the AZURE_TENANT_ID distribution, it is one
+# block to add back.
 
 # READ, never own (conflict C1). sentinel-rg is created out of band by the
 # one-time bootstrap (infra.md §10 step 1) and deleted by ci_destroy_infra's
@@ -34,10 +37,48 @@ data "azurerm_resource_group" "sentinel" {
   name = var.resource_group_name
 }
 
-# ── Module wiring — added in later phases, listed here as the build order ─────
-# module "acr"         {}  # phase 2 · task 2.1
-# module "postgresql"  {}  # phase 2 · task 2.2  (Entra-only auth)
-# module "keyvault"    {}  # phase 2 · task 2.3
+# ── Module wiring ─────────────────────────────────────────────────────────────
+
+module "acr" {
+  source              = "./modules/acr"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+  registry_name       = var.registry_name
+}
+
+module "postgresql" {
+  source              = "./modules/postgresql"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+
+  server_name                         = var.postgres_server_name
+  tenant_id                           = var.tenant_id
+  postgres_entra_admin_object_id      = var.postgres_entra_admin_object_id
+  postgres_entra_admin_principal_name = var.postgres_entra_admin_principal_name
+
+  # enable_backend_admin defaults to false, so the second Entra administrator is
+  # count-guarded to 0. Phase 3 task 3.1 flips it and passes the UAMI principal.
+}
+
+module "keyvault" {
+  source              = "./modules/keyvault"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+
+  vault_name = var.key_vault_name
+  tenant_id  = var.tenant_id
+
+  # The human operator who seeds secrets — explicit, so the assignment does not
+  # follow whoever happened to run apply.
+  kv_admin_object_id = var.kv_admin_object_id
+
+  # The UAMI's principalId, NOT its clientId — a role assignment needs the
+  # service principal's object id.
+  gha_principal_id = azurerm_user_assigned_identity.sentinel_gha.principal_id
+
+  # enable_backend_reader / enable_rotator_officer default to false; phase 3
+  # tasks 3.1 and 3.6 flip them and pass the principal ids.
+}
 # module "aks"         {}  # phase 3 · task 3.1  (workload identity)
 # module "event_grid"  {}  # phase 3 · task 3.2
 # module "functions"   {}  # phase 3 · task 3.3  (Event Grid → GHA bridge)

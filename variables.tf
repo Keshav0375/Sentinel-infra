@@ -71,3 +71,50 @@ variable "github_pat" {
   type        = string
   sensitive   = true
 }
+
+# ── Globally-unique resource names ────────────────────────────────────────────
+# Surfaced at the root so a collision really is a `terraform.tfvars` change, as
+# the module comments claim. Without this passthrough the defaults live inside
+# the modules and a collision would still be a code edit. Four of these names
+# were already taken by other tenants on first check (C12), so this is not
+# hypothetical.
+variable "registry_name" {
+  description = "Globally unique ACR name, alphanumeric only."
+  type        = string
+  default     = "sentinelacr0375"
+}
+
+variable "postgres_server_name" {
+  description = "Globally unique PostgreSQL server name — becomes <name>.postgres.database.azure.com."
+  type        = string
+  default     = "sentinel-pg-0375"
+}
+
+variable "key_vault_name" {
+  description = "Globally unique Key Vault name — becomes <name>.vault.azure.net."
+  type        = string
+  default     = "sentinel-kv-0375"
+}
+
+# The bootstrap scripts assert EXPECTED_SUB because an `az login` to the identity
+# tenant in any other terminal silently repoints every session (it happened during
+# infra 1.3). Terraform asserted nothing. subscription_id is pinned by variable, so
+# only the TENANT could drift — and tenant_id is ForceNew on the Postgres Entra
+# administrator, so a drifted apply would propose REPLACING it with a tenant the
+# server cannot authenticate against, and repointing the Key Vault, after which
+# every RBAC assignment on it resolves against the wrong directory.
+variable "tenant_id" {
+  description = "Entra tenant that owns the subscription. Pinned rather than read from the ambient az context — see the note above. This is the SCHOOL tenant; the identity tenant (R4) is a separate variable added in phase 3."
+  type        = string
+  default     = "12f933b3-3d61-4b19-9a4d-689021de8cc9"
+
+  validation {
+    condition     = can(regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", var.tenant_id))
+    error_message = "tenant_id must be a GUID."
+  }
+}
+
+variable "kv_admin_object_id" {
+  description = "Object ID of the human operator who seeds Key Vault secrets (§10 step 7). Same principal as postgres_entra_admin_object_id in practice, but declared separately because they are different concerns and may diverge."
+  type        = string
+}
