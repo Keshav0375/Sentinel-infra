@@ -76,13 +76,14 @@ resource "azurerm_postgresql_flexible_server_active_directory_administrator" "hu
 }
 
 # The backend pod's workload identity. Deferred: the UAMI is created by the AKS
-# module in phase 3 task 3.1, so there is nothing to point at yet. The count
-# guard lets phase 3 supply the value and have this resource appear as a one-line
-# diff, rather than phase 2 shipping a knowingly-incomplete §3.2 or phase 3
-# editing this file. Task 2.3 defers its backend/rotator role assignments the
-# same way — one pattern for one problem.
+# module in phase 3 task 3.1, so there is nothing to point at yet. Phase 3 flips
+# enable_backend_admin and this resource appears — no edit to this file.
+#
+# The guard is a bool rather than a null-check on the principal id itself,
+# because `count` must be resolvable at PLAN time and the phase-3 caller will
+# pass an id that is only known after apply. Task 2.3 guards the same way.
 resource "azurerm_postgresql_flexible_server_active_directory_administrator" "backend_uami" {
-  count = var.backend_uami_principal_id == null ? 0 : 1
+  count = var.enable_backend_admin ? 1 : 0
 
   server_name         = azurerm_postgresql_flexible_server.sentinel.name
   resource_group_name = var.resource_group_name

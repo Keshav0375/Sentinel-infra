@@ -71,3 +71,32 @@ variable "github_pat" {
   type        = string
   sensitive   = true
 }
+
+# ── Globally-unique resource names ────────────────────────────────────────────
+# Surfaced at the root so a collision really is a `terraform.tfvars` change, as
+# the module comments claim. Without this passthrough the defaults live inside
+# the modules and a collision would still be a code edit. Four of these names
+# were already taken by other tenants on first check (C12), so this is not
+# hypothetical.
+variable "registry_name" {
+  description = "Globally unique ACR name, alphanumeric only."
+  type        = string
+  default     = "sentinelacr0375"
+}
+
+variable "postgres_server_name" {
+  description = "Globally unique PostgreSQL server name — becomes <name>.postgres.database.azure.com."
+  type        = string
+  default     = "sentinel-pg-0375"
+}
+
+variable "key_vault_name" {
+  description = "Globally unique Key Vault name — becomes <name>.vault.azure.net."
+  type        = string
+  default     = "sentinel-kv-0375"
+}
+
+variable "kv_admin_object_id" {
+  description = "Object ID of the human operator who seeds Key Vault secrets (§10 step 7). Same principal as postgres_entra_admin_object_id in practice, but declared separately because they are different concerns and may diverge."
+  type        = string
+}

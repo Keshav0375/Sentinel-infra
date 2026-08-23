@@ -43,6 +43,7 @@ module "acr" {
   source              = "./modules/acr"
   resource_group_name = data.azurerm_resource_group.sentinel.name
   location            = var.location
+  registry_name       = var.registry_name
 }
 
 module "postgresql" {
@@ -50,12 +51,12 @@ module "postgresql" {
   resource_group_name = data.azurerm_resource_group.sentinel.name
   location            = var.location
 
+  server_name                         = var.postgres_server_name
   postgres_entra_admin_object_id      = var.postgres_entra_admin_object_id
   postgres_entra_admin_principal_name = var.postgres_entra_admin_principal_name
 
-  # backend_uami_principal_id is deliberately not passed — it defaults to null
-  # and the second Entra administrator stays count-guarded to 0 until phase 3
-  # task 3.1 creates the backend UAMI.
+  # enable_backend_admin defaults to false, so the second Entra administrator is
+  # count-guarded to 0. Phase 3 task 3.1 flips it and passes the UAMI principal.
 }
 
 module "keyvault" {
@@ -63,12 +64,18 @@ module "keyvault" {
   resource_group_name = data.azurerm_resource_group.sentinel.name
   location            = var.location
 
-  # The UAMI's principalId, not its clientId — the role assignment needs the
+  vault_name = var.key_vault_name
+
+  # The human operator who seeds secrets — explicit, so the assignment does not
+  # follow whoever happened to run apply.
+  kv_admin_object_id = var.kv_admin_object_id
+
+  # The UAMI's principalId, NOT its clientId — a role assignment needs the
   # service principal's object id.
   gha_principal_id = azurerm_user_assigned_identity.sentinel_gha.principal_id
 
-  # backend_uami_principal_id and rotator_principal_id default to null; their
-  # role assignments stay count-guarded to 0 until phase 3 tasks 3.1 and 3.6.
+  # enable_backend_reader / enable_rotator_officer default to false; phase 3
+  # tasks 3.1 and 3.6 flip them and pass the principal ids.
 }
 # module "aks"         {}  # phase 3 · task 3.1  (workload identity)
 # module "event_grid"  {}  # phase 3 · task 3.2

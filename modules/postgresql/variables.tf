@@ -35,11 +35,23 @@ variable "postgres_entra_admin_principal_name" {
 }
 
 # Deferred to phase 3 task 3.1 — the backend UAMI does not exist until the AKS
-# module creates it. `null` keeps the module's contract complete while the second
-# administrator resource stays count-guarded to zero; phase 3 supplies the real
-# value and the admin appears with no edit to this module.
+# module creates it.
+#
+# The toggle is a SEPARATE bool, not `count = var.x == null ? 0 : 1`. That
+# shorter form works only while the value is a literal `null`: in phase 3 the
+# caller passes `module.aks.<uami>.principal_id`, which is UNKNOWN at plan time
+# on the apply that creates it, and `count` on an unknown fails with
+# "The count value depends on resource attributes that cannot be determined
+# until apply". A bool the caller sets explicitly is always known at plan time,
+# while the principal id it guards may legitimately be unknown.
+variable "enable_backend_admin" {
+  description = "Whether to attach the backend UAMI as a second Entra administrator. Set true by the root from phase 3 task 3.1 onward. Must be statically known at plan time — see the note above."
+  type        = bool
+  default     = false
+}
+
 variable "backend_uami_principal_id" {
-  description = "Principal ID of the backend pod's workload-identity UAMI. null until phase 3 task 3.1 creates it."
+  description = "Principal ID of the backend pod's workload-identity UAMI. Ignored unless enable_backend_admin is true; may be unknown at plan time."
   type        = string
   default     = null
 }

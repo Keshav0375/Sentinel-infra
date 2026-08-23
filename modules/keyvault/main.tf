@@ -63,13 +63,29 @@ resource "azurerm_key_vault" "sentinel" {
 # runtime consumers (CI, backend pod) are read-only by construction rather than
 # by convention.
 
-# The operator running `terraform apply` / `az keyvault secret set` — i.e. you
-# locally, and the sentinel-gha identity in CI. This is what makes §10 step 7
-# possible at all.
-resource "azurerm_role_assignment" "terraform_kv_admin" {
+# The HUMAN operator who seeds the 9 secrets (§10 step 7).
+#
+# Deliberately NOT `data.azurerm_client_config.current.object_id`, which the
+# architecture originally specified. That resolves to whoever ran `apply`: the
+# human locally, but the sentinel-gha UAMI in CI. The assignment would then
+# flip-flop on every context switch — and the first CI apply would destroy the
+# human's Officer rights, leaving nobody able to run §10 step 7. It would also
+# silently hand CI write access that §3.3's access table says it must not have.
+#
+# An explicit id is stable regardless of who applies.
+# Renamed from `terraform_kv_admin` when the principal changed from
+# "whoever ran apply" to an explicit id. A `moved` block makes this a state
+# rename rather than a destroy-then-create, so there is never a window in which
+# nobody holds Officer on the vault.
+moved {
+  from = azurerm_role_assignment.terraform_kv_admin
+  to   = azurerm_role_assignment.kv_admin
+}
+
+resource "azurerm_role_assignment" "kv_admin" {
   scope                = azurerm_key_vault.sentinel.id
   role_definition_name = "Key Vault Secrets Officer"
-  principal_id         = data.azurerm_client_config.current.object_id
+  principal_id         = var.kv_admin_object_id
 }
 
 # GHA reads secrets at incident-response time (ci_incident_response fetches LLM
@@ -88,13 +104,17 @@ resource "azurerm_role_assignment" "gha_kv_reader" {
 }
 
 # ── Deferred to phase 3 ───────────────────────────────────────────────────────
-# Same nullable-variable + count pattern as the Postgres backend admin (task 2.2).
+# Same bool-toggle + count pattern as the Postgres backend admin (task 2.2).
 # One deferral style across the whole phase, so a reader learns it once.
+#
+# The toggle is a bool the caller sets, NOT `count = var.principal_id == null`.
+# `count` must resolve at plan time; the phase-3 caller passes principal ids that
+# are only known after the apply that creates them.
 
 # The backend pod reads LLM keys directly from Key Vault via workload identity —
 # which is why no K8s Secret carries them. UAMI created in phase 3 task 3.1.
 resource "azurerm_role_assignment" "backend_kv_reader" {
-  count = var.backend_uami_principal_id == null ? 0 : 1
+  count = var.enable_backend_reader ? 1 : 0
 
   scope                            = azurerm_key_vault.sentinel.id
   role_definition_name             = "Key Vault Secrets User"
@@ -105,7 +125,7 @@ resource "azurerm_role_assignment" "backend_kv_reader" {
 # The rotator Function writes new versions when SecretNearExpiry fires, so it
 # needs Officer rather than User. System-assigned MI created in phase 3 task 3.6.
 resource "azurerm_role_assignment" "rotator_kv_officer" {
-  count = var.rotator_principal_id == null ? 0 : 1
+  count = var.enable_rotator_officer ? 1 : 0
 
   scope                            = azurerm_key_vault.sentinel.id
   role_definition_name             = "Key Vault Secrets Officer"
