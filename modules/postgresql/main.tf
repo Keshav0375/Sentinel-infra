@@ -6,9 +6,11 @@
 # cannot exist. Every client presents a short-lived Entra access token (audience
 # https://ossrdbms-aad.database.windows.net) as the psql password instead.
 #
-# B1MS + 32 GB storage + 32 GB backup matches the Azure for Students 12-month
-# free grant exactly (750 h/month of Burstable B1MS). Changing the SKU or raising
-# storage takes it off the free meter.
+# B1MS + 32 GB storage matches the Azure for Students 12-month free grant exactly
+# (750 h/month of Burstable B1MS, 32 GB storage, 32 GB backup). Note the module
+# does NOT configure backup — backup_retention_days is left at the Azure default
+# of 7 days; the 32 GB is the grant's allowance, not a setting here. Changing the
+# SKU or raising storage takes this off the free meter.
 # ─────────────────────────────────────────────────────────────────────────────
 
 terraform {
@@ -24,10 +26,6 @@ terraform {
     }
   }
 }
-
-# Module-local: data sources do NOT inherit across module boundaries, so this
-# cannot be read from the root — each module that needs tenant_id declares its own.
-data "azurerm_client_config" "current" {}
 
 resource "azurerm_postgresql_flexible_server" "sentinel" {
   name                = var.server_name
@@ -50,7 +48,7 @@ resource "azurerm_postgresql_flexible_server" "sentinel" {
     # attached. Omitting it gives a PERPETUAL DIFF: every plan proposes setting
     # tenant_id back to null, which would read as drift forever and train the
     # reader to ignore a non-empty plan.
-    tenant_id = data.azurerm_client_config.current.tenant_id
+    tenant_id = var.tenant_id
   }
 }
 
@@ -66,7 +64,7 @@ resource "azurerm_postgresql_flexible_server" "sentinel" {
 resource "azurerm_postgresql_flexible_server_active_directory_administrator" "human" {
   server_name         = azurerm_postgresql_flexible_server.sentinel.name
   resource_group_name = var.resource_group_name
-  tenant_id           = data.azurerm_client_config.current.tenant_id
+  tenant_id           = var.tenant_id
   object_id           = var.postgres_entra_admin_object_id
   principal_name      = var.postgres_entra_admin_principal_name
   principal_type      = "User"
@@ -87,7 +85,7 @@ resource "azurerm_postgresql_flexible_server_active_directory_administrator" "ba
 
   server_name         = azurerm_postgresql_flexible_server.sentinel.name
   resource_group_name = var.resource_group_name
-  tenant_id           = data.azurerm_client_config.current.tenant_id
+  tenant_id           = var.tenant_id
   object_id           = var.backend_uami_principal_id
   principal_name      = "sentinel-backend-wi"
   principal_type      = "ServicePrincipal"
@@ -125,6 +123,13 @@ resource "azurerm_postgresql_flexible_server_configuration" "pgvector" {
 # fixed egress IP without a NAT gateway. Production would use a Private Endpoint
 # + VNet integration; that is out of scope for a demo stack and would break the
 # GitHub-hosted runners entirely.
+#
+# LIMIT OF THAT ARGUMENT: it is about who can LOG IN, not about keeping the
+# server UP. max_connections on B_Standard_B1ms is 50, and connection slots are
+# consumed before authentication completes — so a trivial connection flood from
+# anywhere on IPv4 can exhaust them and deny service to the backend pod and every
+# CI workflow, without bypassing auth at all. Accepted for a demo stack on a
+# burstable SKU; a Private Endpoint is the real fix and is out of scope.
 #
 # tfsec/tflint will flag this rule. Annotate the finding — never silence it.
 resource "azurerm_postgresql_flexible_server_firewall_rule" "allow_all_dev" {

@@ -23,14 +23,11 @@ terraform {
   }
 }
 
-# Module-local: data sources do not inherit across module boundaries.
-data "azurerm_client_config" "current" {}
-
 resource "azurerm_key_vault" "sentinel" {
   name                = var.vault_name
   resource_group_name = var.resource_group_name
   location            = var.location
-  tenant_id           = data.azurerm_client_config.current.tenant_id
+  tenant_id           = var.tenant_id
   sku_name            = "standard"
 
   # RBAC, not access policies (decision 2026-07-04). Access policies are a second,
@@ -48,11 +45,17 @@ resource "azurerm_key_vault" "sentinel" {
   # days after any `ci_destroy_infra` run and make the "everything, always"
   # rebuild impossible under the same name.
   #
-  # 7 days + purge allowed, plus an explicit `az keyvault purge` in §7.3, makes
-  # the designed teardown loop actually work. Accepted cost: a mistaken destroy
-  # can be purged for real — tolerable precisely because Terraform stores no
-  # secret values here. Every one of the 9 secrets is re-seedable from its
-  # external source, so the vault holds no unrecoverable state.
+  # 7 days + purge allowed makes the rebuild loop possible — but ONLY for an
+  # Owner. A soft-deleted vault lives at SUBSCRIPTION scope, and the sentinel-gha
+  # identity holds nothing there, so `az keyvault purge` 403s from CI. That is
+  # why teardown is a local Owner-run procedure rather than a workflow (R6,
+  # §7.3), and why omitting the purge fails *later* — on the next apply, when the
+  # provider tries to recover the still-reserved name.
+  #
+  # Accepted cost: a mistaken destroy can be purged for real — tolerable
+  # precisely because Terraform stores no secret values here. Every one of the 9
+  # secrets is re-seedable from its external source, so the vault holds no
+  # unrecoverable state.
   soft_delete_retention_days = 7
   purge_protection_enabled   = false
 }

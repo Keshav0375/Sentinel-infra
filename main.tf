@@ -52,6 +52,7 @@ module "postgresql" {
   location            = var.location
 
   server_name                         = var.postgres_server_name
+  tenant_id                           = var.tenant_id
   postgres_entra_admin_object_id      = var.postgres_entra_admin_object_id
   postgres_entra_admin_principal_name = var.postgres_entra_admin_principal_name
 
@@ -65,6 +66,7 @@ module "keyvault" {
   location            = var.location
 
   vault_name = var.key_vault_name
+  tenant_id  = var.tenant_id
 
   # The human operator who seeds secrets — explicit, so the assignment does not
   # follow whoever happened to run apply.

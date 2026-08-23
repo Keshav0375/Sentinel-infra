@@ -1,3 +1,8 @@
+variable "tenant_id" {
+  description = "Entra tenant id. Passed explicitly by the root rather than read from data.azurerm_client_config, so an ambient az context switch cannot repoint it."
+  type        = string
+}
+
 variable "resource_group_name" {
   description = "Resource group to create the vault in. Supplied by the root from data.azurerm_resource_group.sentinel.name."
   type        = string
@@ -11,7 +16,6 @@ variable "location" {
 variable "vault_name" {
   description = "Globally unique vault name — it becomes <name>.vault.azure.net. A variable rather than a literal so a collision is a tfvars change; the unsuffixed `sentinel-kv` was already taken by another tenant."
   type        = string
-  default     = "sentinel-kv-0375"
 
   validation {
     condition     = can(regex("^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$", var.vault_name))
@@ -55,13 +59,25 @@ variable "enable_rotator_officer" {
 }
 
 variable "backend_uami_principal_id" {
-  description = "Principal ID of the backend pod's workload-identity UAMI. null until phase 3 task 3.1 creates it."
+  description = "Principal ID of the backend pod's workload-identity UAMI. Required when enable_backend_reader is true; may be unknown at plan time."
   type        = string
   default     = null
+
+  # Without this, enabling the toggle without the id fails as
+  # "Missing required argument" — true, but naming the wrong cause.
+  validation {
+    condition     = !var.enable_backend_reader || var.backend_uami_principal_id != null
+    error_message = "enable_backend_reader is true, so backend_uami_principal_id must be set (phase 3 task 3.1 supplies it)."
+  }
 }
 
 variable "rotator_principal_id" {
-  description = "Principal ID of the rotator Function's system-assigned identity. null until phase 3 task 3.6 creates it."
+  description = "Principal ID of the rotator Function's system-assigned identity. Required when enable_rotator_officer is true."
   type        = string
   default     = null
+
+  validation {
+    condition     = !var.enable_rotator_officer || var.rotator_principal_id != null
+    error_message = "enable_rotator_officer is true, so rotator_principal_id must be set (phase 3 task 3.6 supplies it)."
+  }
 }

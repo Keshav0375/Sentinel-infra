@@ -11,7 +11,6 @@ variable "location" {
 variable "registry_name" {
   description = "Globally unique registry name, alphanumeric only (ACR rejects hyphens). Defaulted rather than hardcoded so a collision is a tfvars change, not a code change — the unsuffixed name was already taken by another tenant."
   type        = string
-  default     = "sentinelacr0375"
 
   validation {
     condition     = can(regex("^[a-zA-Z0-9]{5,50}$", var.registry_name))

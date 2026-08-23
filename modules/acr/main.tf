@@ -43,5 +43,15 @@ resource "azurerm_container_registry" "sentinel" {
   # pulled from Key Vault (`acr-password`, §3.3). AKS itself does NOT use this —
   # it pulls via the AcrPull role assignment on its kubelet identity, so no
   # imagePullSecret is needed in the cluster.
+  #
+  # ACCEPTED RISK, stated because the Key Vault module asserts the opposite
+  # invariant a few files away: enabling the admin user means Azure generates a
+  # password and Terraform stores it IN STATE, in plaintext. The state blob is
+  # readable by anyone with Storage Blob Data Contributor on sentinel-state-rg.
+  # This is the one credential in the phase that lives in state, it is inherent
+  # to admin_enabled, and the mitigation is rotation:
+  #   az acr credential renew --name <registry> --password-name password
+  # The `sensitive = true` on the output prevents console exposure; it does
+  # nothing about state.
   admin_enabled = true
 }

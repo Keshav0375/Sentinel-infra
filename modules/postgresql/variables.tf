@@ -1,3 +1,8 @@
+variable "tenant_id" {
+  description = "Entra tenant id. Passed explicitly by the root rather than read from data.azurerm_client_config, so an ambient az context switch cannot repoint it."
+  type        = string
+}
+
 variable "resource_group_name" {
   description = "Resource group to create the server in. Supplied by the root from data.azurerm_resource_group.sentinel.name."
   type        = string
@@ -11,7 +16,6 @@ variable "location" {
 variable "server_name" {
   description = "Globally unique server name — it becomes <name>.postgres.database.azure.com. A variable rather than a literal so a collision is a tfvars change; the unsuffixed `sentinel-pg` was already taken by another tenant."
   type        = string
-  default     = "sentinel-pg-0375"
 
   validation {
     condition     = can(regex("^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$", var.server_name))
@@ -51,7 +55,12 @@ variable "enable_backend_admin" {
 }
 
 variable "backend_uami_principal_id" {
-  description = "Principal ID of the backend pod's workload-identity UAMI. Ignored unless enable_backend_admin is true; may be unknown at plan time."
+  description = "Principal ID of the backend pod's workload-identity UAMI. Required when enable_backend_admin is true; may be unknown at plan time."
   type        = string
   default     = null
+
+  validation {
+    condition     = !var.enable_backend_admin || var.backend_uami_principal_id != null
+    error_message = "enable_backend_admin is true, so backend_uami_principal_id must be set (phase 3 task 3.1 supplies it)."
+  }
 }
