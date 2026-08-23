@@ -56,8 +56,11 @@ module "postgresql" {
   postgres_entra_admin_object_id      = var.postgres_entra_admin_object_id
   postgres_entra_admin_principal_name = var.postgres_entra_admin_principal_name
 
-  # enable_backend_admin defaults to false, so the second Entra administrator is
-  # count-guarded to 0. Phase 3 task 3.1 flips it and passes the UAMI principal.
+  # Flipped by task 3.1: the backend workload identity becomes the second Entra
+  # administrator. The bool is literal (plan-time known); the principal id may be
+  # unknown on the apply that creates the UAMI — that split is the point.
+  enable_backend_admin      = true
+  backend_uami_principal_id = module.aks.backend_identity_principal_id
 }
 
 module "keyvault" {
@@ -76,10 +79,19 @@ module "keyvault" {
   # service principal's object id.
   gha_principal_id = azurerm_user_assigned_identity.sentinel_gha.principal_id
 
-  # enable_backend_reader / enable_rotator_officer default to false; phase 3
-  # tasks 3.1 and 3.6 flip them and pass the principal ids.
+  # Flipped by task 3.1: the backend pod reads LLM keys via workload identity.
+  enable_backend_reader     = true
+  backend_uami_principal_id = module.aks.backend_identity_principal_id
+
+  # enable_rotator_officer stays false until task 3.6 creates the rotator.
 }
-# module "aks"         {}  # phase 3 · task 3.1  (workload identity)
+module "aks" {
+  source              = "./modules/aks"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+  acr_id              = module.acr.acr_id
+  gha_principal_id    = azurerm_user_assigned_identity.sentinel_gha.principal_id
+}
 # module "event_grid"  {}  # phase 3 · task 3.2
 # module "functions"   {}  # phase 3 · task 3.3  (Event Grid → GHA bridge)
 # module "app_service" {}  # phase 3 · task 3.4  (F1, sentinel-deployment target)
