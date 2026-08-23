@@ -125,6 +125,18 @@ resource "azurerm_role_assignment" "backend_kv_reader" {
   skip_service_principal_aad_check = true
 }
 
+# The bridge Function reads github-pat via a Key Vault reference in its app
+# settings. Reference resolution runs as the app's system-assigned identity —
+# no grant, no value, silently. Read-only: the bridge writes nothing.
+resource "azurerm_role_assignment" "bridge_kv_reader" {
+  count = var.enable_bridge_reader ? 1 : 0
+
+  scope                            = azurerm_key_vault.sentinel.id
+  role_definition_name             = "Key Vault Secrets User"
+  principal_id                     = var.bridge_principal_id
+  skip_service_principal_aad_check = true
+}
+
 # The rotator Function writes new versions when SecretNearExpiry fires, so it
 # needs Officer rather than User. System-assigned MI created in phase 3 task 3.6.
 resource "azurerm_role_assignment" "rotator_kv_officer" {

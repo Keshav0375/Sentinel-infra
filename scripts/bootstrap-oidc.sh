@@ -155,6 +155,16 @@ $out"
   done
 }
 
+# Y1 and F1 Linux plans cannot share an RG (live 400, 2026-08-23) — the
+# Functions webspace gets its own, same bootstrap-created pattern as state.
+step "Functions resource group"
+if [ "$(az group exists --name sentinel-func-rg)" = "true" ]; then
+  log "sentinel-func-rg — already exists, skipping"
+else
+  az group create --name sentinel-func-rg --location "$LOCATION" --output none
+  log "sentinel-func-rg — created"
+fi
+
 step "Role assignments"
 assign_role "Contributor" "/subscriptions/$SUB_ID/resourceGroups/$RG" "Contributor on $RG"
 CONTRIB_ID="$ROLE_ASSIGNMENT_ID"

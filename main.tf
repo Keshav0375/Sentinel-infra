@@ -83,6 +83,10 @@ module "keyvault" {
   enable_backend_reader     = true
   backend_uami_principal_id = module.aks.backend_identity_principal_id
 
+  # Flipped by task 3.3: the bridge's KV reference cannot resolve without it.
+  enable_bridge_reader = true
+  bridge_principal_id  = module.functions.bridge_principal_id
+
   # enable_rotator_officer stays false until task 3.6 creates the rotator.
 }
 module "aks" {
@@ -92,6 +96,26 @@ module "aks" {
   acr_id              = module.acr.acr_id
   gha_principal_id    = azurerm_user_assigned_identity.sentinel_gha.principal_id
 }
-# module "event_grid"  {}  # phase 3 · task 3.2
-# module "functions"   {}  # phase 3 · task 3.3  (Event Grid → GHA bridge)
-# module "app_service" {}  # phase 3 · task 3.4  (F1, sentinel-deployment target)
+module "event_grid" {
+  source              = "./modules/event-grid"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+  topic_name          = var.event_topic_name
+  function_app_id     = module.functions.function_app_id
+}
+module "functions" {
+  source = "./modules/functions"
+  # NOT sentinel-rg: Y1 (Dynamic/Linux) cannot share a resource group with the
+  # F1 (Dedicated/Linux) plan already there — see oidc.tf.
+  resource_group_name  = data.azurerm_resource_group.functions.name
+  location             = var.location
+  storage_account_name = var.functions_storage_name
+  bridge_name          = var.bridge_name
+  key_vault_name       = var.key_vault_name
+}
+module "app_service" {
+  source              = "./modules/app-service"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+  app_name            = var.dummy_api_name
+}

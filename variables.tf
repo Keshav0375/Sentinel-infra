@@ -118,3 +118,27 @@ variable "kv_admin_object_id" {
   description = "Object ID of the human operator who seeds Key Vault secrets (§10 step 7). Same principal as postgres_entra_admin_object_id in practice, but declared separately because they are different concerns and may diverge."
   type        = string
 }
+
+variable "dummy_api_name" {
+  description = "Globally unique name of the target web app (0375 convention — the bare dummy-api is taken)."
+  type        = string
+  default     = "dummy-api-0375"
+}
+
+variable "functions_storage_name" {
+  description = "Globally unique storage account backing the Functions Consumption plan."
+  type        = string
+  default     = "sentinelfunc0375"
+}
+
+variable "bridge_name" {
+  description = "Globally unique bridge function app name."
+  type        = string
+  default     = "sentinel-bridge-0375"
+}
+
+variable "event_topic_name" {
+  description = "Event Grid custom topic — its endpoint is a public DNS name."
+  type        = string
+  default     = "sentinel-events-0375"
+}
