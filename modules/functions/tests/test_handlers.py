@@ -20,8 +20,9 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 
 # ── fake azure.functions, just enough for the handlers ────────────────────────
 class _FakeEventGridEvent:
-    def __init__(self, payload):
+    def __init__(self, payload, event_id="evt-42"):
         self._payload = payload
+        self.id = event_id
 
     def get_json(self):
         return self._payload
@@ -96,15 +97,33 @@ class BridgeTests(unittest.TestCase):
         _, body = self._run({"title": "ALERT deploy_status:failed on dummy-api"})
         self.assertEqual(body["client_payload"]["signal_type"], "deploy_failure")
 
-    def test_payload_is_passthrough_plus_stamps(self):
-        data = {"dd_event_id": "e-1", "alert_id": "a-1", "tags": ["t"], "title": "T"}
+    def test_payload_nests_event_under_one_key(self):
+        # GitHub caps client_payload at 10 TOP-LEVEL properties (422 beyond) —
+        # so the Datadog event nests under "event" and the top level stays at 3.
+        data = {f"k{i}": i for i in range(15)} | {"tags": ["t"], "title": "T"}
         _, body = self._run(data)
         cp = body["client_payload"]
-        for k, v in data.items():
-            self.assertEqual(cp[k], v, "original Datadog fields must pass through")
-        self.assertIn("signal_type", cp)
-        self.assertIn("correlation_id", cp)
+        self.assertEqual(sorted(cp), ["correlation_id", "event", "signal_type"])
+        self.assertEqual(cp["event"], data, "full event preserved, nested")
         self.assertEqual(body["event_type"], "incident-alert")
+
+    def test_tags_as_comma_joined_string(self):
+        # Datadog's webhook template renders $TAGS as ONE comma-joined string —
+        # the shape that broke the original " ".join (per-character iteration).
+        _, body = self._run({"tags": "deploy_status:failed,service:dummy-api", "title": "x"})
+        self.assertEqual(body["client_payload"]["signal_type"], "deploy_failure")
+
+    def test_tags_null_does_not_crash(self):
+        _, body = self._run({"tags": None, "title": "boom"})
+        self.assertEqual(body["client_payload"]["signal_type"], "runtime_error")
+
+    def test_correlation_id_is_stable_across_redeliveries(self):
+        # Event Grid re-delivers on failure; the SAME event must keep the SAME
+        # correlation id or duplicates are undedupable downstream.
+        _, b1 = self._run({"title": "x"})
+        _, b2 = self._run({"title": "x"})
+        self.assertEqual(b1["client_payload"]["correlation_id"], "evt-42")
+        self.assertEqual(b2["client_payload"]["correlation_id"], "evt-42")
 
     def test_dispatch_target_and_auth(self):
         req, _ = self._run({"title": "x"})
@@ -145,6 +164,15 @@ class RotateTests(unittest.TestCase):
         sent = self._run({"ObjectName": "anthropic-api-key"},
                          {"TEAMS_WEBHOOK_URL": "", "ANTHROPIC_ADMIN_KEY": ""})
         self.assertEqual(sent, [])
+
+    def test_unresolved_kv_reference_does_not_crash(self):
+        # App Service hands the app the LITERAL "@Microsoft.KeyVault(...)" when
+        # the reference cannot resolve — not an empty string. urlopen on that
+        # literal raises "unknown url type" and would kill the escalation path.
+        sent = self._run({"ObjectName": "openai-api-key"},
+                         {"TEAMS_WEBHOOK_URL": "@Microsoft.KeyVault(VaultName=v;SecretName=s)",
+                          "ANTHROPIC_ADMIN_KEY": ""})
+        self.assertEqual(sent, [], "must log and return, never call urlopen")
 
     def test_anthropic_without_admin_key_takes_manual_path(self):
         sent = self._run({"ObjectName": "anthropic-api-key"},

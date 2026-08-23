@@ -86,6 +86,12 @@ resource "azurerm_linux_function_app" "bridge" {
     # WEBSITE_RUN_FROM_PACKAGE alongside these — they are mutually exclusive.
     "SCM_DO_BUILD_DURING_DEPLOYMENT" = "true"
     "ENABLE_ORYX_BUILD"              = "true"
+
+    # zip_deploy_file is a constant PATH — the provider diffs the string, so a
+    # src/ edit alone never redeploys (review blocker, 2026-08-23). The hash
+    # changes with the content, forces an app update, and the provider re-runs
+    # the zip deploy on any update.
+    "DEPLOY_HASH" = data.archive_file.bridge.output_base64sha256
   }
 
   zip_deploy_file = data.archive_file.bridge.output_path
@@ -133,6 +139,9 @@ resource "azurerm_linux_function_app" "rotator" {
 
     "SCM_DO_BUILD_DURING_DEPLOYMENT" = "true"
     "ENABLE_ORYX_BUILD"              = "true"
+
+    # Same content-hash redeploy trigger as the bridge.
+    "DEPLOY_HASH" = data.archive_file.rotator.output_base64sha256
   }
 
   zip_deploy_file = data.archive_file.rotator.output_path

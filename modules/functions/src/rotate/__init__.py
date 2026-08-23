@@ -28,6 +28,13 @@ ROTATABLE = {"anthropic-api-key", "openai-api-key"}
 
 def _teams(message: str) -> None:
     url = os.environ.get("TEAMS_WEBHOOK_URL", "")
+    # An UNRESOLVED Key Vault reference is not empty — App Service hands the app
+    # the literal "@Microsoft.KeyVault(...)" string (grant missing, secret not
+    # seeded (B8), or the app not yet restarted after the grant). urlopen would
+    # die on it with "unknown url type" and kill the escalation path.
+    if url.startswith("@Microsoft.KeyVault"):
+        logging.warning("rotate: TEAMS_WEBHOOK_URL is an unresolved KV reference — grant/seed/restart missing. Wanted to say: %s", message)
+        return
     if not url:
         # B8 open: no webhook seeded yet. Log loudly rather than crash — the
         # SecretNearExpiry event will re-fire on its schedule.
@@ -81,7 +88,14 @@ def main(event: func.EventGridEvent) -> None:
             expires_on=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=90),
         )
         logging.info("rotate: %s rotated, new version set with +90d expiry", secret_name)
-        _teams(f"Sentinel: `{secret_name}` rotated automatically (new version, +90d).")
+        # Best-effort AFTER the write: if Teams fails here and the exception
+        # escaped, Event Grid would re-deliver and the handler would MINT AGAIN
+        # — up to 30 extra key versions for one notification hiccup. The secret
+        # is already rotated; a lost courtesy ping must not raise.
+        try:
+            _teams(f"Sentinel: `{secret_name}` rotated automatically (new version, +90d).")
+        except Exception:
+            logging.exception("rotate: rotated OK but the Teams notification failed (ignored)")
     else:
         _teams(
             f"Sentinel: `{secret_name}` expires in ~30 days and cannot be auto-rotated. "

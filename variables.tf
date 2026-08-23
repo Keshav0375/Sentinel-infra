@@ -156,10 +156,13 @@ variable "identity_tenant_id" {
   default     = "eae0d3c6-af22-4b70-ad3b-12d625a06139"
 }
 
-# Auth-mode split for the aliased azuread provider. Provider-level args, NOT
-# ARM_* env: in CI the azurerm provider reads ARM_CLIENT_ID for sentinel-gha
-# (school tenant), and env would leak the same client id into azuread — which
-# must authenticate as sentinel-tf-identity in a DIFFERENT tenant.
+# Auth-mode split for the aliased azuread provider. CORRECTED 2026-08-23: a
+# null provider arg does NOT block the env fallback — azuread still reads
+# ARM_CLIENT_ID when client_id is null. So in CI (where azure/login exports
+# ARM_CLIENT_ID for sentinel-gha, the WRONG identity for this tenant) the
+# workflows MUST pass -var identity_client_id AND -var identity_use_oidc=true
+# explicitly; a set provider arg overrides env. Locally both stay null/false
+# and no ARM_* env exists, so CLI-as-guest auth applies.
 variable "identity_client_id" {
   description = "clientId of sentinel-tf-identity for CI OIDC auth to the identity tenant. Leave null locally — the guest-invited CLI login is used instead."
   type        = string

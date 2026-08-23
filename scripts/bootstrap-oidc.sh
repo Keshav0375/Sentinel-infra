@@ -193,6 +193,12 @@ assign_role "Contributor" "/subscriptions/$SUB_ID/resourceGroups/$STATE_RG" \
   "Contributor on $STATE_RG"
 STATE_RG_ID="$ROLE_ASSIGNMENT_ID"
 
+# CI cannot self-manage this one either (RBAC Administrator is scoped to
+# sentinel-rg only), so it is bootstrap-owned, NEVER a Terraform resource and
+# never imported — a managed assignment here would 403 any CI create/destroy.
+assign_role "Contributor" "/subscriptions/$SUB_ID/resourceGroups/sentinel-func-rg" \
+  "Contributor on sentinel-func-rg"
+
 # Belt and braces: never print an import command with an empty id.
 [ -n "$CONTRIB_ID" ]    || die "Could not resolve the Contributor assignment id."
 [ -n "$BLOB_ID" ]       || die "Could not resolve the Storage Blob Data Contributor assignment id."
