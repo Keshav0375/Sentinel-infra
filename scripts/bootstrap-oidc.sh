@@ -187,7 +187,7 @@ assign_role "Role Based Access Control Administrator" \
   "RBAC Administrator on $RG"
 RBAC_ADMIN_ID="$ROLE_ASSIGNMENT_ID"
 
-# ci_destroy_infra ends with `az group delete sentinel-state-rg`; the blob grant
+# The teardown (§7.3) ends with `az group delete sentinel-state-rg`; the blob grant
 # above covers data inside the account, not the group itself.
 assign_role "Contributor" "/subscriptions/$SUB_ID/resourceGroups/$STATE_RG" \
   "Contributor on $STATE_RG"

@@ -1,0 +1,162 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dry run — validate everywhere, plan where a credential exists.
+# architecture/infra.md §7.1 · decisions.md 2026-08-24 (phase-4 decision 3)
+#
+# THE SPLIT IS THE POINT. §7.1 originally triggered the whole workflow on
+# `push: ['**']`, but §4.2 declares federated credentials for exactly two
+# subjects per repo — `ref:refs/heads/main` and `pull_request`. Azure matches a
+# federated subject as an exact, case-sensitive string with no wildcard form, so
+# a push to `dev/anything` has no credential and `azure/login` fails. Every
+# branch of this build would have shown a red X.
+#
+# Rather than mint one credential per branch (limit 20, and it would hand Azure
+# access to every dev branch), the jobs split by what they actually need:
+#
+#   run-validate  no Azure, no secrets, no state  → runs on EVERY push
+#   run-plan      real credential + remote state  → PRs and main only
+#
+# `terraform validate` needs no variable values and no provider credentials —
+# verified empirically, not assumed — which is what makes run-validate able to
+# run before B9 (the GitHub PAT) is even seeded.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "[infra] terraform — validate and plan (dry run)"
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+# Least privilege at the top; run-plan widens it for itself only.
+permissions:
+  contents: read
+
+# The plan reads the state blob. Two concurrent runs on the same ref would
+# contend for the lease and one would fail on a lock it cannot explain.
+concurrency:
+  group: infra-dry-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to the version used locally. `fmt -check` is version-sensitive:
+  # a newer Terraform can reformat a file the older one considered formatted,
+  # which turns a green local gate into a red CI run for no real reason.
+  TF_VERSION: "1.15.8"
+
+jobs:
+  run-validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+
+      # -backend=false is what makes this job credential-free: it installs the
+      # providers and resolves the modules without ever touching the state
+      # storage account, which is the only thing here that needs an identity.
+      - name: Initialize (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        run: terraform validate -no-color
+
+  run-plan:
+    name: Plan
+    needs: run-validate
+    # The two federated subjects that exist. Anything else has no credential.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write        # mint the OIDC token azure/login exchanges
+      contents: read
+      pull-requests: write   # post the plan comment
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Authenticates the `az` CLI. It does NOT configure the azurerm provider
+      # or its backend — those read ARM_* from the environment, which is why
+      # every terraform step below sets them explicitly. §8.1 claimed they
+      # "arrive from the workflow"; nothing set them until now.
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Initialize
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+        run: terraform init -input=false
+
+      # Every value travels through `env:` rather than being interpolated into
+      # the command line. Two reasons: `${{ }}` spliced into a `run:` block is
+      # the standard GitHub Actions script-injection surface, and a secret on an
+      # argv line survives in process listings even when the log masks it.
+      - name: Plan
+        id: plan
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+          TF_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          TF_LOCATION: ${{ vars.AZURE_LOCATION }}
+          TF_PG_ADMIN_OBJECT_ID: ${{ vars.PG_ADMIN_OBJECT_ID }}
+          TF_PG_ADMIN_PRINCIPAL_NAME: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
+          TF_KV_ADMIN_OBJECT_ID: ${{ vars.KV_ADMIN_OBJECT_ID }}
+          TF_IDENTITY_CLIENT_ID: ${{ vars.AZURE_IDENTITY_CLIENT_ID }}
+          TF_GITHUB_PAT: ${{ secrets.GH_PAT }}
+        # -var= flags, never TF_VAR_* (C5): one explicit list beats an ambient
+        # naming convention nobody can grep for. No db_password — Postgres is
+        # Entra-only and has no password to pass.
+        run: |
+          terraform plan -no-color -input=false \
+            -var="subscription_id=${TF_SUBSCRIPTION_ID}" \
+            -var="location=${TF_LOCATION}" \
+            -var="postgres_entra_admin_object_id=${TF_PG_ADMIN_OBJECT_ID}" \
+            -var="postgres_entra_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}" \
+            -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}" \
+            -var="identity_client_id=${TF_IDENTITY_CLIENT_ID}" \
+            -var="identity_use_oidc=true" \
+            -var="github_pat=${TF_GITHUB_PAT}"
+
+      - name: Comment plan on the pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PLAN_STDOUT: ${{ steps.plan.outputs.stdout }}
+        with:
+          script: |
+            // GitHub rejects an issue comment over 65536 characters. A plan that
+            // touches every module clears that easily, so truncate at 60000 and
+            // say so — a silently cut plan is worse than a short one.
+            const LIMIT = 60000;
+            const raw = process.env.PLAN_STDOUT || '(no plan output)';
+            const body = raw.length > LIMIT
+              ? raw.slice(0, LIMIT) + '\n\n... truncated at ' + LIMIT + ' characters. Full plan is in the job log.'
+              : raw;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '### Terraform plan\n\n```terraform\n' + body + '\n```',
+            });

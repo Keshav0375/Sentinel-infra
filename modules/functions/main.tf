@@ -47,11 +47,38 @@ resource "azurerm_service_plan" "functions" {
 # R6 review), and an app with no code would fail Event Grid's endpoint
 # validation when task 3.2 creates the subscription. Zip + remote Oryx build
 # keeps the module self-contained; the zip hash retriggers deploy on src change.
+# ── Packaging determinism ─────────────────────────────────────────────────────
+# DEPLOY_HASH below is output_base64sha256, so the zip's BYTES decide whether
+# Terraform thinks the function changed. Three separate things made those bytes
+# differ for byte-identical source, and every one of them had to be closed:
+#
+#   1. __pycache__. src/ is the source_dir, so running the unit tests compiled
+#      bytecode INTO the package. The hash moved on every gate run — a perpetual
+#      diff redeploying both apps forever — and shipped CPython 3.13 Windows
+#      bytecode to a Linux 3.11 host. Closed by `excludes`.
+#   2. Line endings. src/*.py|json|txt were uncovered by .gitattributes: Windows
+#      checked out CRLF, a Linux runner LF. Closed there.
+#   3. FILE MODE. archive_file records a Unix mode per entry, taken from the
+#      filesystem — 0666 on Windows, 0644 on Linux. Found at the phase-4 review;
+#      on its own it would have kept local apply and CI apply redeploying past
+#      each other forever, with a byte-identical tree and nothing to see in git.
+#      Closed by `output_file_mode`.
+#
+# Mtimes were never a problem: the provider stamps every entry with a constant
+# sentinel date (1 Jan 2049), which is why touching a file changes nothing.
+#
+# A `dynamic "source"` block built from a fileset was tried instead and rejected.
+# It is deterministic too, but it writes entries with NO Unix mode at all
+# (verified: mode 0o0), leaving extraction behaviour on the Functions host to a
+# default this repo cannot see. source_dir + output_file_mode keeps the packaging
+# shape that has already deployed successfully and normalises the one field that
+# actually varied.
 data "archive_file" "bridge" {
-  type        = "zip"
-  source_dir  = "${path.module}/src"
-  output_path = "${path.module}/dist/bridge.zip"
-  excludes    = ["rotate"] # task 3.6 adds the rotator's own app + zip
+  type             = "zip"
+  source_dir       = "${path.module}/src"
+  output_path      = "${path.module}/dist/bridge.zip"
+  output_file_mode = "0644"
+  excludes         = ["rotate", "bridge/__pycache__", "__pycache__"]
 }
 
 resource "azurerm_linux_function_app" "bridge" {
@@ -99,10 +126,11 @@ resource "azurerm_linux_function_app" "bridge" {
 
 # ── Rotator (task 3.6) ────────────────────────────────────────────────────────
 data "archive_file" "rotator" {
-  type        = "zip"
-  source_dir  = "${path.module}/src"
-  output_path = "${path.module}/dist/rotator.zip"
-  excludes    = ["bridge"]
+  type             = "zip"
+  source_dir       = "${path.module}/src"
+  output_path      = "${path.module}/dist/rotator.zip"
+  output_file_mode = "0644"
+  excludes         = ["bridge", "rotate/__pycache__", "__pycache__"]
 }
 
 # Second app on the same Y1 plan. SystemAssigned: this identity is the only

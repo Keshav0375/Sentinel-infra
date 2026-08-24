@@ -2,7 +2,7 @@
 # Remote state (architecture/infra.md §8.1).
 #
 # State lives in its OWN resource group, not sentinel-rg, so that
-# ci_destroy_infra's `terraform destroy` + `az group delete` cannot destroy the
+# the Owner-run local teardown (§7.3, R6) cannot destroy the
 # state that describes what it is destroying.
 #
 # Auth is Entra, not a storage access key:

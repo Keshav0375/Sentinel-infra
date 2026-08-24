@@ -1,0 +1,88 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Apply — the only automated writer of Sentinel's Azure estate.
+# architecture/infra.md §7.2
+#
+# There is deliberately NO destroy counterpart. R6 (2026-08-16): full teardown
+# needs to purge a soft-deleted Key Vault, and deleted vaults live at
+# SUBSCRIPTION scope where this identity holds nothing. From CI the purge 403s
+# silently and the next apply then fails on the reserved name. Granting CI a
+# subscription-scope Key Vault role would let it manage every vault in the
+# subscription — a permanent privilege for a once-a-project operation. Teardown
+# is therefore an Owner-run local procedure (§7.3), and this repo ships three
+# workflows, not four.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "[infra] terraform — apply"
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+# Never cancel an in-flight apply — a killed apply leaves the state lease held
+# and the real infrastructure half-changed. Queue instead.
+concurrency:
+  group: infra-apply
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.15.8"
+
+jobs:
+  run-apply:
+    name: Apply
+    runs-on: ubuntu-latest
+    # A GitHub environment, so a required-reviewer rule can be switched on
+    # later without touching this file. It is the only human gate between a
+    # merge to main and a change to live Azure.
+    environment: production
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Initialize
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+        run: terraform init -input=false
+
+      - name: Apply
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+          TF_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          TF_LOCATION: ${{ vars.AZURE_LOCATION }}
+          TF_PG_ADMIN_OBJECT_ID: ${{ vars.PG_ADMIN_OBJECT_ID }}
+          TF_PG_ADMIN_PRINCIPAL_NAME: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
+          TF_KV_ADMIN_OBJECT_ID: ${{ vars.KV_ADMIN_OBJECT_ID }}
+          TF_IDENTITY_CLIENT_ID: ${{ vars.AZURE_IDENTITY_CLIENT_ID }}
+          TF_GITHUB_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          terraform apply -auto-approve -no-color -input=false \
+            -var="subscription_id=${TF_SUBSCRIPTION_ID}" \
+            -var="location=${TF_LOCATION}" \
+            -var="postgres_entra_admin_object_id=${TF_PG_ADMIN_OBJECT_ID}" \
+            -var="postgres_entra_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}" \
+            -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}" \
+            -var="identity_client_id=${TF_IDENTITY_CLIENT_ID}" \
+            -var="identity_use_oidc=true" \
+            -var="github_pat=${TF_GITHUB_PAT}"

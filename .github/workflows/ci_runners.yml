@@ -1,0 +1,74 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Rebuild and push the CI runner image.
+# architecture/infra.md §6.3
+#
+# Path-filtered to ci-images/** so a terraform change does not rebuild a
+# 1 GB image for nothing. ci-images/build-push.sh does the same job by hand and
+# exists only to break the bootstrap circularity: this workflow needs an ACR
+# that the first `terraform apply` creates, and that apply wants a runner image.
+# After the first manual push, this workflow owns every rebuild — which is what
+# keeps `ci-runner:latest` corresponding to a commit on main rather than to
+# whatever was on someone's laptop.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "[infra] runners — build and push"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ci-images/**'
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: infra-runners
+  cancel-in-progress: true
+
+env:
+  # Duplicates var.registry_name's default. A workflow cannot read a Terraform
+  # variable, so this is unavoidable — the same unavoidable duplication as the
+  # storage account name in backend.tf and oidc.tf. Change them together.
+  ACR_NAME: sentinelacr0375
+
+jobs:
+  build-and-push:
+    name: Build and Push Runner Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Exchanges the Azure credential for a short-lived ACR token and writes it
+      # into the docker config. No registry password is stored anywhere.
+      - name: Log in to ACR
+        run: az acr login --name "${ACR_NAME}"
+
+      - name: Resolve login server
+        id: acr
+        run: echo "login_server=$(az acr show --name "${ACR_NAME}" --query loginServer -o tsv)" >> "$GITHUB_OUTPUT"
+
+      # ubuntu-latest is x86-64 and this image runs as a job `container:` on that
+      # host, never as an AKS pod — so it is amd64, unlike the backend image the
+      # ARM64 node pool forces. Explicit rather than implicit: the default is
+      # already right here, but stating it stops a future self-hosted or arm64
+      # runner from silently changing the answer.
+      - name: Build
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --file ci-images/ci-runner.Dockerfile \
+            --tag "${{ steps.acr.outputs.login_server }}/ci-runner:latest" \
+            ci-images
+
+      - name: Push
+        run: docker push "${{ steps.acr.outputs.login_server }}/ci-runner:latest"

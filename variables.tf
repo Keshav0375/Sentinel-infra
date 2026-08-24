@@ -174,3 +174,22 @@ variable "identity_use_oidc" {
   type        = bool
   default     = false
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Task 4.1 deferral toggle.
+#
+# github-repo-config.tf pushes secrets and variables into the Sentinel and
+# Sentinel-deployment repos, which needs a PAT with `repo` scope (B9, open).
+# Until that lands, the github provider cannot authenticate and every plan that
+# includes those resources fails with a 401 that reads like broken config.
+#
+# Same deferral pattern as enable_backend_admin / enable_bridge_reader /
+# enable_rotator_officer in phases 2-3: a bool driving `count`, NOT
+# `count = var.github_pat == "" ? 0 : 1`. `count` must resolve at PLAN time and a
+# value arriving from a CI secret is unknown then.
+# ─────────────────────────────────────────────────────────────────────────────
+variable "enable_repo_config" {
+  description = "Push secrets/variables to the Sentinel and Sentinel-deployment repos. Requires a valid github_pat (B9). Flip to true once the PAT is seeded."
+  type        = bool
+  default     = false
+}
