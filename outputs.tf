@@ -107,16 +107,18 @@ output "function_app_id" {
   value       = module.functions.function_app_id
 }
 
-# topic_endpoint and topic_key are a PAIR — a publisher needs both and neither is
-# useful alone. Consumed by deployment task 2.3, which points the Datadog monitor
-# webhooks at this topic.
+# Consumed by deployment task 2.3, which points the Datadog monitor webhooks here.
 output "event_grid_topic_endpoint" {
   description = "Event Grid custom-topic endpoint. Datadog monitor webhooks POST here."
   value       = module.event_grid.topic_endpoint
 }
 
-output "event_grid_topic_key" {
-  description = "Event Grid access key. Pairs with event_grid_topic_endpoint; read with `terraform output -raw`."
-  value       = module.event_grid.topic_key
-  sensitive   = true
-}
+# The matching ACCESS KEY is deliberately NOT an output — it broke rule 2 at the
+# top of this file, three blocks after that rule was written. A publisher does
+# need it, but its one consumer is a human pasting it into Datadog's webhook
+# config once, and `az` is already a narrower channel than this repo's public
+# interface:
+#
+#   az eventgrid topic key list -n sentinel-events-0375 -g sentinel-rg #     --query key1 -o tsv
+#
+# Same reasoning that keeps the ACR admin password out of here.
