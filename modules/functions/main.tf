@@ -51,7 +51,12 @@ data "archive_file" "bridge" {
   type        = "zip"
   source_dir  = "${path.module}/src"
   output_path = "${path.module}/dist/bridge.zip"
-  excludes    = ["rotate"] # task 3.6 adds the rotator's own app + zip
+  # "rotate": task 3.6 packages the rotator separately. "__pycache__": running the
+  # unit tests compiles bytecode INTO src/, which then rides into the zip and
+  # changes output_base64sha256 on every gate run - a perpetual diff that
+  # redeploys both apps forever. It also ships CPython 3.13 Windows bytecode to a
+  # Linux 3.11 host, where it is at best ignored and at worst stale.
+  excludes = ["rotate", "bridge/__pycache__", "__pycache__"]
 }
 
 resource "azurerm_linux_function_app" "bridge" {
@@ -102,7 +107,7 @@ data "archive_file" "rotator" {
   type        = "zip"
   source_dir  = "${path.module}/src"
   output_path = "${path.module}/dist/rotator.zip"
-  excludes    = ["bridge"]
+  excludes    = ["bridge", "rotate/__pycache__", "__pycache__"]
 }
 
 # Second app on the same Y1 plan. SystemAssigned: this identity is the only

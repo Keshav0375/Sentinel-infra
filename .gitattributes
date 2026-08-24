@@ -21,3 +21,11 @@
 # the shell invocation exactly the way it breaks a .sh file.
 *.Dockerfile text eol=lf
 Dockerfile   text eol=lf
+
+# Function-app sources. Uncovered until 2026-08-24, which meant a Windows checkout
+# produced CRLF and a Linux CI checkout produced LF -- so archive_file hashed two
+# different zips for byte-identical code, and local apply and CI apply would each
+# redeploy what the other had just deployed, forever.
+*.py   text eol=lf
+*.json text eol=lf
+*.txt  text eol=lf
