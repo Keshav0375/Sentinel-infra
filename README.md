@@ -88,9 +88,9 @@ python ../Sentinel/scripts/quality_gate.py --repo infra --path .
 | `key_vault_uri` | backend secret loading; the manual seeding commands |
 | `app_url` | the deployment repo's Verify step |
 | `function_app_id` | Event Grid subscriptions |
-| `event_grid_topic_endpoint` + `event_grid_topic_key` | Datadog monitor webhooks (a pair — neither is useful alone) |
+| `event_grid_topic_endpoint` | Datadog monitor webhooks. The matching access key is deliberately not an output — read it with `az eventgrid topic key list` |
 
-The ACR admin password is **not** a root output. It reaches the backend repo as a GitHub secret
+Neither the ACR admin password nor the Event Grid access key is a root output. The password reaches the backend repo as a GitHub secret
 pushed by `github-repo-config.tf`, which is a narrower channel than `terraform output`.
 
 ## Local use

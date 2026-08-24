@@ -58,7 +58,7 @@ fi
 
 # ── Resource group ───────────────────────────────────────────────────────────
 # Deliberately NOT sentinel-rg. State lives in its own group so that
-# ci_destroy_infra's `terraform destroy` + `az group delete` on sentinel-rg
+# The teardown's (§7.3) `terraform destroy` + `az group delete` on sentinel-rg
 # cannot delete the state describing what it is destroying.
 step "Resource group: $STATE_RG"
 if [ "$(az group exists --name "$STATE_RG")" = "true" ]; then

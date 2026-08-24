@@ -42,7 +42,7 @@ resource "azurerm_key_vault" "sentinel" {
   # Soft-delete is mandatory on Key Vault — the only choice is how long, and
   # whether a delete can ever be made permanent. Azure defaults to 90 days +
   # purge protection, which would strand this vault's GLOBALLY UNIQUE name for 90
-  # days after any `ci_destroy_infra` run and make the "everything, always"
+  # days after any teardown (§7.3) and make the "everything, always"
   # rebuild impossible under the same name.
   #
   # 7 days + purge allowed makes the rebuild loop possible — but ONLY for an
@@ -99,7 +99,7 @@ resource "azurerm_role_assignment" "gha_kv_reader" {
   principal_id         = var.gha_principal_id
 
   # Set on assignments Terraform CREATES against a service principal. On a
-  # post-ci_destroy_infra rebuild the UAMI is brand new and Entra replication
+  # post-teardown rebuild the UAMI is brand new and Entra replication
   # lags, which surfaces as an intermittent PrincipalNotFound. Safe here because
   # this resource is created, never imported — the flag is create-only and fails
   # with "doesn't support update" if added to an existing assignment (infra 1.3).

@@ -200,7 +200,18 @@ secrets, because under OIDC they are identifiers rather than credentials:
 | variable | `AZURE_LOCATION` | `canadacentral` |
 | variable | `PG_ADMIN_OBJECT_ID` | `az ad signed-in-user show --query id -o tsv` |
 | variable | `PG_ADMIN_PRINCIPAL_NAME` | your UPN |
+| variable | `KV_ADMIN_OBJECT_ID` | `az ad signed-in-user show --query id -o tsv` — same value as `PG_ADMIN_OBJECT_ID`, but a separate variable on purpose: the Key Vault admin and the database admin are the same person today and need not stay that way |
+| variable | `AZURE_IDENTITY_CLIENT_ID` | `8f7ff635-799b-4bdd-b1fa-2ff9bbe75560` — `sentinel-tf-identity`, the app CI authenticates as in the **identity** tenant (R4) |
 | **secret** | `GH_PAT` | GitHub PAT, `repo` scope |
+
+⚠️ **An unset variable is not an error.** GitHub renders a missing `vars.X` as the empty
+string, so the workflow runs `-var="kv_admin_object_id="` and Terraform fails somewhere
+downstream with a message about a Key Vault role assignment. Set all eight before the first
+CI run, and if a plan fails oddly, check this table first.
+
+There is no `AZURE_IDENTITY_TENANT_ID` variable here: no workflow passes it, because
+`variables.tf` pins the identity tenant as a default. It *is* pushed to the `Sentinel` repo
+by task 4.1, where the backend workflows do need it.
 
 > The secret is `GH_PAT`, **not** `GITHUB_PAT`. GitHub reserves the `GITHUB_` prefix and
 > rejects any secret or variable using it — the original name was uncreatable.
@@ -258,3 +269,103 @@ az account set --subscription 174e25ca-ab82-4671-a913-9c2f66e5924d
 `identity.tf` still resolves correctly from this school context, because the school account
 is a redeemed **guest** with Application Administrator in the identity tenant — the aliased
 `azuread` provider mints a token for the same signed-in user.
+
+---
+
+## Step 6 — First apply
+
+```powershell
+az postgres flexible-server start -n sentinel-pg-0375 -g sentinel-rg   # see Day 2
+terraform init
+terraform plan      # read it. every resource should be a create or a no-op
+terraform apply
+```
+
+## Step 7 — Push the CI runner image (once)
+
+`ci_runners.yml` rebuilds this image on every change to `ci-images/**` — but it authenticates
+to an ACR that only exists after step 6, and it runs on a runner that wants the image. One
+manual push breaks the circularity; after that, never run this by hand.
+
+```bash
+./ci-images/build-push.sh
+az acr repository show-tags --name sentinelacr0375 --repository ci-runner -o tsv   # expect: latest
+```
+
+## Step 8 — Seed the Key Vault secrets (B4–B8)
+
+**Terraform never writes a runtime secret.** The vault is created empty on purpose: a secret
+in state is a secret in a storage account, readable by anything with state access, and
+diffable in every plan. These are set by hand, once, and rotated at the provider.
+
+```bash
+az keyvault secret set --vault-name sentinel-kv-0375 --name anthropic-api-key  --value <...>
+az keyvault secret set --vault-name sentinel-kv-0375 --name openai-api-key     --value <...>
+az keyvault secret set --vault-name sentinel-kv-0375 --name datadog-api-key    --value <...>
+az keyvault secret set --vault-name sentinel-kv-0375 --name datadog-app-key    --value <...>
+az keyvault secret set --vault-name sentinel-kv-0375 --name langfuse-public-key --value <...>
+az keyvault secret set --vault-name sentinel-kv-0375 --name langfuse-secret-key --value <...>
+az keyvault secret set --vault-name sentinel-kv-0375 --name teams-webhook-url  --value <...>
+```
+
+Set `--expires` on each. The rotation Function watches `SecretNearExpiry`; a secret with no
+expiry never fires it, so the rotation path silently does nothing.
+
+## Step 9 — Turn on cross-repo distribution (B9)
+
+`github-repo-config.tf` ships **disabled**, because the github provider authenticates at
+configure time and a missing PAT fails the whole plan with a 401 rather than skipping one
+resource.
+
+1. Create a GitHub PAT with `repo` scope and set it as the `GH_PAT` secret (step 5).
+2. Change `enable_repo_config`'s default to `true` in `variables.tf` and commit — one line,
+   reviewable, and it leaves a date in the history for when distribution turned on.
+3. Apply. Then confirm:
+
+```bash
+gh secret   list -R Keshav0375/Sentinel              # 3:  ACR_LOGIN_SERVER, ACR_USERNAME, ACR_PASSWORD
+gh variable list -R Keshav0375/Sentinel              # 6:  AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+                                                     #     AZURE_IDENTITY_TENANT_ID, AZURE_GHA_CLIENT_ID, SENTINEL_API_AUDIENCE
+gh variable list -R Keshav0375/Sentinel-deployment   # 3:  AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+```
+
+---
+
+## Teardown — Owner-run, local, deliberate (§7.3)
+
+**There is no destroy workflow, and adding one would be a mistake.** R6, 2026-08-16:
+
+A full teardown has to *purge* the soft-deleted Key Vault. Deleted vaults live at
+**subscription** scope, and the CI identity holds nothing there — its RBAC Administrator is
+scoped to `sentinel-rg` by design. From CI the purge returns 403, `|| true` swallows it, and
+the next apply fails on a vault name that is reserved for another 7 days by a vault nobody
+can see. Granting CI a subscription-scope Key Vault role would fix the purge and hand a
+workflow reachable from `pull_request` triggers the ability to manage every vault in the
+subscription — a permanent privilege for a once-a-project operation.
+
+So teardown is a thing a human does, as Owner, on purpose:
+
+```bash
+# 0. Confirm the context. This deletes everything; the two-tenant hazard above is
+#    not a theoretical concern here.
+az account show --query "{sub:name, tenant:tenantId}" -o tsv
+
+# 1. Terraform-managed resources.
+az postgres flexible-server start -n sentinel-pg-0375 -g sentinel-rg   # or destroy errors
+terraform destroy
+
+# 2. The bootstrap-created resource groups Terraform only reads.
+az group delete --name sentinel-rg      --yes
+az group delete --name sentinel-func-rg --yes
+
+# 3. PURGE the vault. Without this, sentinel-kv-0375 is unusable for 7 days and a
+#    rebuild fails on the reserved name. This is the step CI cannot do.
+az keyvault purge --name sentinel-kv-0375 --location canadacentral
+
+# 4. State last — it describes everything above, so it goes when nothing needs it.
+az group delete --name sentinel-state-rg --yes
+```
+
+Rebuilding afterwards means starting again from Step 1: the bootstrap seams
+(`bootstrap-state.sh`, `bootstrap-oidc.sh`, the 7-object import) exist precisely because
+Terraform cannot create the identity and the storage its own pipeline runs on.

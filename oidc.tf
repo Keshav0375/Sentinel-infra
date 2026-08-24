@@ -46,7 +46,7 @@ resource "azurerm_user_assigned_identity" "sentinel_gha" {
 # the PrincipalNotFound race when Terraform creates a role assignment against a
 # service principal that has not finished replicating — but these two assignments
 # are ALWAYS created by scripts/bootstrap-oidc.sh and only imported by Terraform,
-# including after a ci_destroy_infra rebuild, so the race cannot occur. It is also
+# including after a teardown/rebuild (§7.3), so the race cannot occur. It is also
 # create-only in the provider: setting it on an imported assignment plans as an
 # in-place update that then fails with "doesn't support update".
 #
@@ -73,7 +73,7 @@ resource "azurerm_role_assignment" "gha_state_blob" {
 # include Microsoft.Authorization/*/Write and /Delete. Phases 2-3 declare six
 # Terraform-managed assignments (Key Vault Secrets Officer/User, AcrPull, AKS
 # Cluster User), so without this the first CI apply that touches any of them dies
-# with AuthorizationFailed, and ci_destroy_infra cannot tear them down either.
+# with AuthorizationFailed, and the teardown cannot remove them either.
 #
 # Phase 1 never caught this because every apply so far ran locally as subscription
 # Owner. CI has not exercised this identity once.
@@ -90,7 +90,7 @@ resource "azurerm_role_assignment" "gha_rbac_admin" {
   principal_id         = azurerm_user_assigned_identity.sentinel_gha.principal_id
 }
 
-# ci_destroy_infra (§7.3) finishes with `az group delete --name sentinel-state-rg`.
+# The Owner-run teardown (§7.3) finishes with `az group delete --name sentinel-state-rg`.
 # The data-plane grant above covers blobs inside the account and nothing else, so
 # the delete would fail — silently, since §7.3 masks it with `|| true` — leaving
 # the state account behind on every teardown.
@@ -173,3 +173,31 @@ data "azurerm_resource_group" "functions" {
 # rebuild's apply would die AuthorizationFailed before reaching the functions.
 # scripts/bootstrap-oidc.sh creates it idempotently instead, alongside the
 # other grants CI cannot self-manage.
+
+# ── The environment credential ────────────────────────────────────────────────
+# Found at the phase-4 review, 2026-08-24, before it ever ran.
+#
+# A job that declares `environment: production` does NOT get the subject its
+# branch would suggest. GitHub rewrites the OIDC `sub` claim to
+#
+#     repo:<owner>/<repo>:environment:<name>
+#
+# replacing the `ref:refs/heads/main` form entirely. §7.2 requires
+# `environment: production` on the apply job — so `sentinel-infra-main` above,
+# which every other main-branch workflow matches, would NOT have matched the one
+# workflow that changes live infrastructure. The failure is
+# `AADSTS700213: No matching federated identity record found`, at azure/login,
+# with the subject masked if the identity values are secrets rather than
+# variables — which is the second reason they are variables.
+#
+# This is the exact reason wildcards are not offered on federated subjects: the
+# subject is a precise statement about WHICH workflow context you trust, and an
+# environment is a different context from a branch. It is deliberately not
+# implied by the branch credential.
+resource "azurerm_federated_identity_credential" "sentinel_infra_env_production" {
+  name                      = "sentinel-infra-env-production"
+  user_assigned_identity_id = azurerm_user_assigned_identity.sentinel_gha.id
+  audience                  = local.entra_audience
+  issuer                    = local.github_oidc_issuer
+  subject                   = "repo:${var.github_owner}/Sentinel-infra:environment:production"
+}
