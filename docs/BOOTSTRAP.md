@@ -187,6 +187,52 @@ the flag is create-only, so setting it on an imported assignment plans as an in-
 that fails with `doesn't support update`. Phase 2/3 assignments do create against fresh
 identities and should set it.
 
+## Step 4b — Identity-tenant federated credentials (R4)
+
+**The two-tenant split doubles the federated-credential surface, and this is the half that is
+easy to forget.** CI authenticates to *two* tenants on every run: the school tenant as the
+`sentinel-gha` UAMI (azurerm), and the identity tenant as the `sentinel-tf-identity` app
+registration (the aliased `azuread` provider). A federated credential is scoped to one identity
+in one tenant — so **every workflow context needs a credential in both places**.
+
+B11 created only `sentinel-tf-main` (`ref:refs/heads/main`). Proven live 2026-08-24: a
+pull-request run gets all the way through the azurerm plan, prints every output, and *then*
+dies with `AADSTS700213` building the azuread client. The message names the subject, not the
+tenant, so it reads like the school-tenant credential is broken when that one worked perfectly.
+
+The identity tenant needs all three subjects the school tenant has:
+
+| Credential | Subject | Used by |
+|---|---|---|
+| `sentinel-tf-main` | `repo:Keshav0375/Sentinel-infra:ref:refs/heads/main` | ✅ exists (B11) |
+| `sentinel-tf-pr` | `repo:Keshav0375/Sentinel-infra:pull_request` | `ci_infra_dry.yml` `run-plan` |
+| `sentinel-tf-env-production` | `repo:Keshav0375/Sentinel-infra:environment:production` | `ci_infra.yml` apply |
+
+These are **bootstrap objects**, not Terraform resources — Terraform authenticates *as* this
+app, so it cannot manage its own credentials. Same paradox as the UAMI in step 4.
+
+```powershell
+# ⚠️ This repoints the SHARED az context (see the Day 2 hazard). Switch back after.
+az login --tenant eae0d3c6-af22-4b70-ad3b-12d625a06139 --allow-no-subscriptions
+
+$app = "378ccade-dd35-4f92-a71f-4a781fe5ace3"   # sentinel-tf-identity, app objectId
+
+'{"name":"sentinel-tf-pr","issuer":"https://token.actions.githubusercontent.com","subject":"repo:Keshav0375/Sentinel-infra:pull_request","audiences":["api://AzureADTokenExchange"]}' | Out-File -Encoding utf8 fic-pr.json
+az ad app federated-credential create --id $app --parameters "@fic-pr.json"
+
+'{"name":"sentinel-tf-env-production","issuer":"https://token.actions.githubusercontent.com","subject":"repo:Keshav0375/Sentinel-infra:environment:production","audiences":["api://AzureADTokenExchange"]}' | Out-File -Encoding utf8 fic-env.json
+az ad app federated-credential create --id $app --parameters "@fic-env.json"
+
+az ad app federated-credential list --id $app --query "[].{name:name,subject:subject}" -o tsv
+Remove-Item fic-pr.json, fic-env.json
+
+# Back to the school tenant, or the next terraform apply runs in the wrong context.
+az login --tenant 12f933b3-3d61-4b19-9a4d-689021de8cc9
+az account set --subscription 174e25ca-ab82-4671-a913-9c2f66e5924d
+```
+
+---
+
 ## Step 5 — GitHub configuration
 
 Set on the `Keshav0375/Sentinel-infra` repo. Note the split — these are **variables**, not
