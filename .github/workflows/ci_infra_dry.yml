@@ -20,13 +20,25 @@
 # run before B9 (the GitHub PAT) is even seeded.
 # ─────────────────────────────────────────────────────────────────────────────
 
-name: "[infra] terraform — validate and plan (dry run)"
+name: "Sentinel Infra — Validate & Plan"
 
 on:
   push:
     branches: ['**']
   pull_request:
     branches: [main]
+  # Manual runs. NOTE the credential constraint: a workflow_dispatch presents
+  # the subject `repo:<owner>/<repo>:ref:refs/heads/<branch>`, and the only
+  # branch with a federated credential is `main`. Dispatching Validate works
+  # from any branch (it needs no Azure at all); asking for a plan from a dev/*
+  # branch will fail at azure/login, by design.
+  workflow_dispatch:
+    inputs:
+      run_plan:
+        description: 'Also run the plan. Needs a credential — only works when dispatched from main.'
+        type: boolean
+        required: false
+        default: true
 
 # Least privilege at the top; run-plan widens it for itself only.
 permissions:
@@ -80,7 +92,7 @@ jobs:
     #
     # A merge to main now runs run-validate here (no Azure) and ci_infra's
     # apply. One writer, one lease.
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.run_plan)
     runs-on: ubuntu-latest
     permissions:
       id-token: write        # mint the OIDC token azure/login exchanges

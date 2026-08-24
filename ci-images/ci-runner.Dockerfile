@@ -37,13 +37,21 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # libpq (for asyncpg/psycopg builds) is an apt package. Alpine would need musl
 # wheels for asyncpg and a completely different CLI install path.
 
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    DEBIAN_FRONTEND=noninteractive     # pyright-python caches its Node runtime under $HOME. Actions sets
-    # HOME=/github/home for container jobs, so a warm-up landing in /root/.cache
-    # is invisible at run time and every job re-downloads Node. An absolute path
-    # makes the warm-up below actually pay off.
-    PYRIGHT_PYTHON_CACHE_DIR=/opt/pyright-cache
+# PYRIGHT_PYTHON_CACHE_DIR: pyright-python caches its Node runtime under $HOME.
+# Actions sets HOME=/github/home for container jobs, so a warm-up landing in
+# /root/.cache is invisible at run time and every job re-downloads Node. An
+# absolute path makes the warm-up at the bottom of this file actually pay off.
+#
+# NOTE: this comment sits ABOVE the ENV, and each ENV is its own line with no
+# backslash continuation at all. Docker does not allow a
+# comment within a line continuation — it parses the `#` as an env key and fails
+# with `Syntax error - can't find = in "#"`. That mistake shipped and broke the
+# first CI build of this image, because nothing lints Dockerfiles: the quality
+# gate has no hadolint check and the Docker daemon was not running locally.
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYRIGHT_PYTHON_CACHE_DIR=/opt/pyright-cache
 
 # ── System packages (§6.1) ───────────────────────────────────────────────────
 #   curl        — required BY the Azure CLI installer, and used by health checks

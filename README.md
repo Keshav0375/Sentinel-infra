@@ -49,11 +49,30 @@ PGPASSWORD="$(az account get-access-token \
 
 ## Workflows
 
-| File | Trigger | What it does |
-|------|---------|--------------|
-| `ci_infra_dry.yml` | every push; PRs to `main` | `run-validate` (no Azure) on every push; `run-plan` on PRs and `main`, posting the plan as a PR comment |
-| `ci_infra.yml` | push to `main` | `terraform apply -auto-approve`, gated by the `production` environment |
-| `ci_runners.yml` | push to `main` under `ci-images/**` | rebuilds and pushes `ci-runner:latest` |
+| Workflow | File | Runs when | What it does |
+|---|---|---|---|
+| **Sentinel Infra — Validate & Plan** | `ci_infra_dry.yml` | every push · PRs to `main` · manual | `Run Validate` (no Azure) on every push; `Run Plan` on PRs, posting the plan as a PR comment |
+| **Sentinel Infra — Deploy** | `ci_infra.yml` | push to `main` · manual | `terraform apply`, gated by the `production` environment. Manual runs can choose `plan-only` or `refresh-only`, and `-target` a single resource |
+| **Runner Image — Build & Deploy to ACR** | `ci_runners.yml` | push to `main` under `ci-images/**` · manual | Builds and publishes `ci-runner` |
+
+**Image versioning.** Every runner build publishes an immutable `sha-<7>` tag and moves
+`latest`. The newest 3 `sha-*` tags are retained; older ones are untagged. To pin a consuming
+workflow — or to fall back after a bad build — reference the sha:
+
+```yaml
+container:
+  image: sentinelacr0375.azurecr.io/ci-runner:sha-1a2b3c4
+```
+
+Rolling `previous` / `previous-2` aliases were rejected: a fallback whose meaning changes on the
+next build is not a fallback. Cleanup uses `az acr repository untag`, never `delete` — `delete`
+removes the *manifest* and every tag pointing at it, so pruning an old sha whose digest matches
+`latest` would take `latest` with it.
+
+**All three accept `workflow_dispatch`.** One credential caveat: a manual run presents the
+subject `repo:<owner>/<repo>:ref:refs/heads/<branch>`, and only `main` has a federated
+credential. Dispatching `Run Validate` works from any branch because it touches no Azure;
+asking for a plan from a `dev/*` branch fails at `azure/login`, by design.
 
 **There is no destroy workflow, and that is deliberate.** Tearing down fully requires purging a
 soft-deleted Key Vault, and deleted vaults live at *subscription* scope where the CI identity
