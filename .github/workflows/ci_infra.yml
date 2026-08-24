@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Apply — the only automated writer of Sentinel's Azure estate.
+# Deploy — the only automated writer of Sentinel's Azure estate.
 # architecture/infra.md §7.2
 #
 # There is deliberately NO destroy counterpart. R6 (2026-08-16): full teardown
@@ -12,11 +12,30 @@
 # workflows, not four.
 # ─────────────────────────────────────────────────────────────────────────────
 
-name: "[infra] terraform — apply"
+name: "Sentinel Infra — Deploy"
 
 on:
   push:
     branches: [main]
+  # Manual runs. `plan-only` is the safe rehearsal: same credential, same
+  # variables, same state — it just stops before writing. Useful once a branch is
+  # already merged, when the PR plan is no longer there to consult.
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'apply = write · plan-only = show the diff and stop · refresh-only = reconcile state with reality, change nothing'
+        type: choice
+        required: true
+        default: apply
+        options:
+          - apply
+          - plan-only
+          - refresh-only
+      target:
+        description: 'Optional single resource address for -target (e.g. module.acr.azurerm_container_registry.sentinel). Blank = whole estate.'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   id-token: write
@@ -32,12 +51,18 @@ env:
   TF_VERSION: "1.15.8"
 
 jobs:
-  run-apply:
-    name: Run Apply
+  run-deploy:
+    name: Run Deploy
     runs-on: ubuntu-latest
-    # A GitHub environment, so a required-reviewer rule can be switched on
-    # later without touching this file. It is the only human gate between a
-    # merge to main and a change to live Azure.
+    # A GitHub environment, so a required-reviewer rule can be switched on later
+    # without touching this file. It is the only human gate between a merge to
+    # main and a change to live Azure.
+    #
+    # It also RENAMES the OIDC subject to
+    # `repo:<owner>/<repo>:environment:production` — not the branch form. That
+    # needs its own federated credential (`sentinel-infra-env-production` in the
+    # school tenant, `sentinel-tf-env-production` in the identity tenant), and
+    # its absence is what failed the very first apply.
     environment: production
     steps:
       - name: Check out
@@ -82,8 +107,10 @@ jobs:
           ARM_USE_OIDC: "true"
         run: terraform init -input=false
 
-      - name: Apply
+      - name: Deploy
         env:
+          TF_MODE: ${{ inputs.mode || 'apply' }}
+          TF_TARGET: ${{ inputs.target }}
           ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
           ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
@@ -95,8 +122,32 @@ jobs:
           TF_KV_ADMIN_OBJECT_ID: ${{ vars.KV_ADMIN_OBJECT_ID }}
           TF_IDENTITY_CLIENT_ID: ${{ vars.AZURE_IDENTITY_CLIENT_ID }}
           TF_GITHUB_PAT: ${{ secrets.GH_PAT }}
+        # A push always applies. Only a manual dispatch can choose otherwise —
+        # `inputs.mode` is empty on a push, so the default below is what runs.
+        #
+        # -target is a documented escape hatch, not a habit: it applies a
+        # subgraph and leaves the rest un-reconciled, so the next full run has to
+        # catch up. Reachable manually, never on a push.
         run: |
-          terraform apply -auto-approve -no-color -input=false \
+          args=(-no-color -input=false)
+          if [ -n "${TF_TARGET}" ]; then
+            args+=("-target=${TF_TARGET}")
+          fi
+          case "${TF_MODE}" in
+            plan-only)
+              verb=plan
+              ;;
+            refresh-only)
+              verb=apply
+              args+=(-auto-approve -refresh-only)
+              ;;
+            *)
+              verb=apply
+              args+=(-auto-approve)
+              ;;
+          esac
+          echo "running: terraform ${verb} ${args[*]}"
+          terraform "${verb}" "${args[@]}" \
             -var="subscription_id=${TF_SUBSCRIPTION_ID}" \
             -var="location=${TF_LOCATION}" \
             -var="postgres_entra_admin_object_id=${TF_PG_ADMIN_OBJECT_ID}" \
