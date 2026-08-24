@@ -52,6 +52,23 @@ variable "enable_backend_reader" {
   default     = false
 }
 
+variable "enable_bridge_reader" {
+  description = "Whether to grant the bridge Function's system-assigned identity read access. Set true by the root from phase 3 task 3.3 onward — without it the bridge's GITHUB_TOKEN Key Vault reference resolves silently empty."
+  type        = bool
+  default     = false
+}
+
+variable "bridge_principal_id" {
+  description = "System-assigned principal of the bridge Function. Required when enable_bridge_reader is true; may be unknown at plan time."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = !var.enable_bridge_reader || var.bridge_principal_id != null
+    error_message = "enable_bridge_reader is true, so bridge_principal_id must be set (task 3.3 supplies it)."
+  }
+}
+
 variable "enable_rotator_officer" {
   description = "Whether to grant the rotator Function write access. Set true by the root from phase 3 task 3.6 onward."
   type        = bool
@@ -80,4 +97,10 @@ variable "rotator_principal_id" {
     condition     = !var.enable_rotator_officer || var.rotator_principal_id != null
     error_message = "enable_rotator_officer is true, so rotator_principal_id must be set (phase 3 task 3.6 supplies it)."
   }
+}
+
+variable "rotator_app_id" {
+  description = "Rotator function app resource id, for the SecretNearExpiry subscription endpoint. Required when enable_rotator_officer is true."
+  type        = string
+  default     = null
 }

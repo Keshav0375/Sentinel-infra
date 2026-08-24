@@ -236,3 +236,6 @@ terraform.tfvars
 *.tfplan
 crash.log
 crash.*.log
+
+# Terraform-built function deploy artifacts (archive_file output)
+modules/functions/dist/

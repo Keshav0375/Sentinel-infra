@@ -29,3 +29,7 @@ github_owner = "Keshav0375"
 # GitHub PAT, `repo` scope. Never commit the real value — terraform.tfvars is
 # gitignored precisely so this line stays a placeholder in git.
 github_pat = "ghp_replace_me"
+
+# The personal IDENTITY tenant (R4) — holds only the two backend-API app
+# registrations. Consumed by the aliased azuread provider from task 3.5 on.
+identity_tenant_id = "eae0d3c6-af22-4b70-ad3b-12d625a06139"

@@ -207,3 +207,54 @@ secrets, because under OIDC they are identifiers rather than credentials:
 
 There is no `AZURE_CLIENT_SECRET` (OIDC removes it), no `DB_PASSWORD` (PostgreSQL is
 Entra-only), and no `sentinel-api-token`.
+
+---
+
+## Day 2 — stopping and starting
+
+Two resources idle **stopped** to conserve the free grants, and they behave *differently*
+under Terraform. Getting this wrong costs a confusing failed plan, so it is written down
+once here rather than rediscovered.
+
+| Resource | Idle state | `terraform plan` while stopped | Auto-restart |
+|---|---|---|---|
+| `sentinel-pg-0375` (Postgres) | Stopped | ❌ **Errors** — `400 ServerStoppedError` on 4 resources | Azure restarts it after **7 days** |
+| `sentinel-aks` (AKS) | Stopped | ✅ Works fine | No |
+
+```powershell
+# Before ANY terraform command:
+az postgres flexible-server start -n sentinel-pg-0375 -g sentinel-rg
+
+# After you are done (it consumes grant hours while Ready):
+az postgres flexible-server stop  -n sentinel-pg-0375 -g sentinel-rg
+
+# AKS is the backend's scale-to-zero mechanism, not a manual chore — the incident
+# workflows drive it (backend §8.5). A system pool cannot scale below 1 node, so
+# it is the whole CLUSTER that stops, not the node pool.
+az aks start -g sentinel-rg -n sentinel-aks
+az aks stop  -g sentinel-rg -n sentinel-aks
+```
+
+**Why Postgres errors and AKS does not:** the azurerm provider must *refresh* the Postgres
+administrators, database and `azure.extensions` configuration, and the control plane refuses
+those reads while the server is stopped. AKS exposes its whole configuration regardless of
+power state.
+
+## Day 2 — the two-tenant `az` context hazard
+
+`az` keeps **one** context in `~/.azure`, shared by every terminal. Sentinel spans two
+tenants (school = resources, personal = the two app registrations), so **any** `az login
+--tenant <identity>` silently repoints every other session — this has happened four times
+during the build. Both bootstrap scripts assert `EXPECTED_SUB` and refuse to run in the
+wrong context; plain `terraform apply` does not.
+
+```powershell
+# Always confirm before applying:
+az account show --query "{sub:name, tenant:tenantId}" -o tsv
+# Expect: Azure for Students   12f933b3-3d61-4b19-9a4d-689021de8cc9
+az account set --subscription 174e25ca-ab82-4671-a913-9c2f66e5924d
+```
+
+`identity.tf` still resolves correctly from this school context, because the school account
+is a redeemed **guest** with Application Administrator in the identity tenant — the aliased
+`azuread` provider mints a token for the same signed-in user.

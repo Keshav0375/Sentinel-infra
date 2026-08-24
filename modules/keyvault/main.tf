@@ -125,6 +125,18 @@ resource "azurerm_role_assignment" "backend_kv_reader" {
   skip_service_principal_aad_check = true
 }
 
+# The bridge Function reads github-pat via a Key Vault reference in its app
+# settings. Reference resolution runs as the app's system-assigned identity —
+# no grant, no value, silently. Read-only: the bridge writes nothing.
+resource "azurerm_role_assignment" "bridge_kv_reader" {
+  count = var.enable_bridge_reader ? 1 : 0
+
+  scope                            = azurerm_key_vault.sentinel.id
+  role_definition_name             = "Key Vault Secrets User"
+  principal_id                     = var.bridge_principal_id
+  skip_service_principal_aad_check = true
+}
+
 # The rotator Function writes new versions when SecretNearExpiry fires, so it
 # needs Officer rather than User. System-assigned MI created in phase 3 task 3.6.
 resource "azurerm_role_assignment" "rotator_kv_officer" {
@@ -134,4 +146,41 @@ resource "azurerm_role_assignment" "rotator_kv_officer" {
   role_definition_name             = "Key Vault Secrets Officer"
   principal_id                     = var.rotator_principal_id
   skip_service_principal_aad_check = true
+}
+
+# ── Rotation wiring (task 3.6) ────────────────────────────────────────────────
+# System topic on the vault: Azure emits lifecycle events (SecretNearExpiry ~30
+# days out) with no polling. Lives here rather than in the event-grid module
+# because its lifecycle is the VAULT's — destroy the vault, the topic dies too.
+resource "azurerm_eventgrid_system_topic" "kv" {
+  count = var.enable_rotator_officer ? 1 : 0
+
+  name                = "${var.vault_name}-events"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  topic_type          = "Microsoft.KeyVault.vaults"
+
+  # NOT the deprecated `source_arm_resource_id` — fourth azurerm-v4 rename of
+  # this class (enable_rbac_authorization, parent_id, resource_group_name).
+  source_resource_id = azurerm_key_vault.sentinel.id
+}
+
+resource "azurerm_eventgrid_system_topic_event_subscription" "rotate" {
+  count = var.enable_rotator_officer ? 1 : 0
+
+  name                = "sentinel-rotate-on-near-expiry"
+  system_topic        = azurerm_eventgrid_system_topic.kv[0].name
+  resource_group_name = var.resource_group_name
+
+  # Only the near-expiry event — the topic also emits NewVersionCreated, which
+  # the rotator itself triggers: subscribing to it would loop.
+  included_event_types = ["Microsoft.KeyVault.SecretNearExpiry"]
+
+  azure_function_endpoint {
+    function_id = "${var.rotator_app_id}/functions/rotate"
+
+    # Service defaults, declared — omitting them is a perpetual diff (task 3.2).
+    max_events_per_batch              = 1
+    preferred_batch_size_in_kilobytes = 64
+  }
 }

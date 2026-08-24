@@ -118,3 +118,59 @@ variable "kv_admin_object_id" {
   description = "Object ID of the human operator who seeds Key Vault secrets (§10 step 7). Same principal as postgres_entra_admin_object_id in practice, but declared separately because they are different concerns and may diverge."
   type        = string
 }
+
+variable "dummy_api_name" {
+  description = "Globally unique name of the target web app (0375 convention — the bare dummy-api is taken)."
+  type        = string
+  default     = "dummy-api-0375"
+}
+
+variable "functions_storage_name" {
+  description = "Globally unique storage account backing the Functions Consumption plan."
+  type        = string
+  default     = "sentinelfunc0375"
+}
+
+variable "bridge_name" {
+  description = "Globally unique bridge function app name."
+  type        = string
+  default     = "sentinel-bridge-0375"
+}
+
+variable "event_topic_name" {
+  description = "Event Grid custom topic — its endpoint is a public DNS name."
+  type        = string
+  default     = "sentinel-events-0375"
+}
+
+variable "rotator_name" {
+  description = "Globally unique rotator function app name."
+  type        = string
+  default     = "sentinel-rotator-0375"
+}
+
+# ── Identity tenant (R4) ──────────────────────────────────────────────────────
+variable "identity_tenant_id" {
+  description = "The personally-owned Entra tenant holding ONLY the two backend-API app registrations (R4). Not the school tenant."
+  type        = string
+  default     = "eae0d3c6-af22-4b70-ad3b-12d625a06139"
+}
+
+# Auth-mode split for the aliased azuread provider. CORRECTED 2026-08-23: a
+# null provider arg does NOT block the env fallback — azuread still reads
+# ARM_CLIENT_ID when client_id is null. So in CI (where azure/login exports
+# ARM_CLIENT_ID for sentinel-gha, the WRONG identity for this tenant) the
+# workflows MUST pass -var identity_client_id AND -var identity_use_oidc=true
+# explicitly; a set provider arg overrides env. Locally both stay null/false
+# and no ARM_* env exists, so CLI-as-guest auth applies.
+variable "identity_client_id" {
+  description = "clientId of sentinel-tf-identity for CI OIDC auth to the identity tenant. Leave null locally — the guest-invited CLI login is used instead."
+  type        = string
+  default     = null
+}
+
+variable "identity_use_oidc" {
+  description = "true in CI (GitHub OIDC exchange, as sentinel-tf-identity); false locally (az CLI as the guest-invited school account)."
+  type        = bool
+  default     = false
+}

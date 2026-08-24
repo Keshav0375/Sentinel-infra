@@ -30,5 +30,11 @@ terraform {
       source  = "integrations/github"
       version = "~> 6.0"
     }
+    # Added at task 3.5, exactly as promised above: aliased to the personally-
+    # owned IDENTITY tenant, used by identity.tf and nothing else.
+    azuread = {
+      source  = "hashicorp/azuread"
+      version = "~> 3.0"
+    }
   }
 }

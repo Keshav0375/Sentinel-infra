@@ -56,8 +56,11 @@ module "postgresql" {
   postgres_entra_admin_object_id      = var.postgres_entra_admin_object_id
   postgres_entra_admin_principal_name = var.postgres_entra_admin_principal_name
 
-  # enable_backend_admin defaults to false, so the second Entra administrator is
-  # count-guarded to 0. Phase 3 task 3.1 flips it and passes the UAMI principal.
+  # Flipped by task 3.1: the backend workload identity becomes the second Entra
+  # administrator. The bool is literal (plan-time known); the principal id may be
+  # unknown on the apply that creates the UAMI — that split is the point.
+  enable_backend_admin      = true
+  backend_uami_principal_id = module.aks.backend_identity_principal_id
 }
 
 module "keyvault" {
@@ -76,10 +79,48 @@ module "keyvault" {
   # service principal's object id.
   gha_principal_id = azurerm_user_assigned_identity.sentinel_gha.principal_id
 
-  # enable_backend_reader / enable_rotator_officer default to false; phase 3
-  # tasks 3.1 and 3.6 flip them and pass the principal ids.
+  # Flipped by task 3.1: the backend pod reads LLM keys via workload identity.
+  enable_backend_reader     = true
+  backend_uami_principal_id = module.aks.backend_identity_principal_id
+
+  # Flipped by task 3.3: the bridge's KV reference cannot resolve without it.
+  enable_bridge_reader = true
+  bridge_principal_id  = module.functions.bridge_principal_id
+
+  # Flipped by task 3.6: the rotator is the vault's only non-human WRITE
+  # principal, and the SecretNearExpiry wiring rides the same toggle.
+  enable_rotator_officer = true
+  rotator_principal_id   = module.functions.rotator_principal_id
+  rotator_app_id         = module.functions.rotator_app_id
 }
-# module "aks"         {}  # phase 3 · task 3.1  (workload identity)
-# module "event_grid"  {}  # phase 3 · task 3.2
-# module "functions"   {}  # phase 3 · task 3.3  (Event Grid → GHA bridge)
-# module "app_service" {}  # phase 3 · task 3.4  (F1, sentinel-deployment target)
+module "aks" {
+  source              = "./modules/aks"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+  acr_id              = module.acr.acr_id
+  gha_principal_id    = azurerm_user_assigned_identity.sentinel_gha.principal_id
+}
+module "event_grid" {
+  source              = "./modules/event-grid"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+  topic_name          = var.event_topic_name
+  function_app_id     = module.functions.function_app_id
+}
+module "functions" {
+  source = "./modules/functions"
+  # NOT sentinel-rg: Y1 (Dynamic/Linux) cannot share a resource group with the
+  # F1 (Dedicated/Linux) plan already there — see oidc.tf.
+  resource_group_name  = data.azurerm_resource_group.functions.name
+  location             = var.location
+  storage_account_name = var.functions_storage_name
+  bridge_name          = var.bridge_name
+  rotator_name         = var.rotator_name
+  key_vault_name       = var.key_vault_name
+}
+module "app_service" {
+  source              = "./modules/app-service"
+  resource_group_name = data.azurerm_resource_group.sentinel.name
+  location            = var.location
+  app_name            = var.dummy_api_name
+}

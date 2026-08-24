@@ -155,3 +155,21 @@ resource "azurerm_federated_identity_credential" "sentinel_deployment_main" {
   issuer                    = local.github_oidc_issuer
   subject                   = "repo:${var.github_owner}/Sentinel-deployment:ref:refs/heads/main"
 }
+
+# ── Functions resource group ──────────────────────────────────────────────────
+# Linux Consumption (Y1) and Linux Dedicated (F1) plans CANNOT share a resource
+# group — Azure rejects the second webspace kind with "Requested features
+# 'Dynamic SKU, Linux Worker' not available in resource group" (found live
+# 2026-08-23; the F1 plan for dummy-api claimed sentinel-rg's Linux webspace).
+# Same pattern as sentinel-state-rg: bootstrap-created, read here, never owned.
+data "azurerm_resource_group" "functions" {
+  name = "sentinel-func-rg"
+}
+
+# The CI Contributor grant on THIS resource group is deliberately NOT a
+# Terraform resource (warden blocker, 2026-08-23 — an R5-class repeat). CI's
+# RBAC Administrator is scoped to sentinel-rg only, so a Terraform-managed
+# assignment here could never be created or destroyed from CI: the first
+# rebuild's apply would die AuthorizationFailed before reaching the functions.
+# scripts/bootstrap-oidc.sh creates it idempotently instead, alongside the
+# other grants CI cannot self-manage.
