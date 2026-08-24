@@ -16,3 +16,8 @@
 *.md      text eol=lf
 *.yml     text eol=lf
 *.yaml    text eol=lf
+
+# Dockerfiles are read by the Linux docker daemon; CRLF in a RUN line breaks
+# the shell invocation exactly the way it breaks a .sh file.
+*.Dockerfile text eol=lf
+Dockerfile   text eol=lf
