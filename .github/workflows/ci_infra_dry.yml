@@ -46,7 +46,7 @@ env:
 
 jobs:
   run-validate:
-    name: Validate
+    name: Run Validate
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -70,10 +70,17 @@ jobs:
         run: terraform validate -no-color
 
   run-plan:
-    name: Plan
+    name: Run Plan
     needs: run-validate
-    # The two federated subjects that exist. Anything else has no credential.
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    # PULL REQUESTS ONLY. It also ran on `push: main`, which raced ci_infra.yml:
+    # both fired on the same merge commit, both opened the state blob, and
+    # whichever lost the lease failed with a lock error describing nothing. The
+    # plan added no value there anyway — apply computes its own — and cancelling
+    # the plan to protect the apply would just move the confusing failure.
+    #
+    # A merge to main now runs run-validate here (no Azure) and ci_infra's
+    # apply. One writer, one lease.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       id-token: write        # mint the OIDC token azure/login exchanges
@@ -98,6 +105,25 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # A stopped flexible-server makes terraform ERROR with
+      # `400 ServerStoppedError` on four resources: the provider must refresh the
+      # administrators, database and azure.extensions config, and none of that
+      # reads while the server is down. AKS has no such problem.
+      #
+      # It idles STOPPED to conserve grant hours, so CI cannot assume it is up —
+      # and this has broken a run three times. Starting an already-running server
+      # is an error, not a no-op, hence the state check rather than `|| true`.
+      - name: Ensure the database is running
+        env:
+          PG_NAME: sentinel-pg-0375
+          PG_RG: sentinel-rg
+        run: |
+          state="$(az postgres flexible-server show -n "${PG_NAME}" -g "${PG_RG}" --query state -o tsv)"
+          echo "postgres: ${state}"
+          if [ "${state}" != "Ready" ]; then
+            az postgres flexible-server start -n "${PG_NAME}" -g "${PG_RG}"
+          fi
 
       - name: Initialize
         env:

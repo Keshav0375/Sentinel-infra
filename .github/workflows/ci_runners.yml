@@ -55,7 +55,13 @@ jobs:
 
       - name: Resolve login server
         id: acr
-        run: echo "login_server=$(az acr show --name "${ACR_NAME}" --query loginServer -o tsv)" >> "$GITHUB_OUTPUT"
+        # Assigned first, then echoed. `echo "x=$(az …)"` returns ECHO's status,
+        # so an az failure writes an empty output and the job builds
+        # `/ci-runner:latest` against no registry — surfacing three steps later
+        # as an unintelligible docker tag error instead of here.
+        run: |
+          login_server="$(az acr show --name "${ACR_NAME}" --query loginServer -o tsv)"
+          echo "login_server=${login_server}" >> "$GITHUB_OUTPUT"
 
       # ubuntu-latest is x86-64 and this image runs as a job `container:` on that
       # host, never as an AKS pod — so it is amd64, unlike the backend image the

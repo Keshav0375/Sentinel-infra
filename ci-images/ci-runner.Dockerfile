@@ -27,13 +27,23 @@
 
 FROM python:3.12-slim
 
+# bash with pipefail, so the `curl | bash` below cannot succeed on a failed
+# download. The default /bin/sh here is dash, which has no pipefail: a 404 page
+# would be piped to bash, do nothing, exit 0, and bake an image with no Azure
+# CLI that fails at azure/login in whichever workflow used it next.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # Debian-based on purpose: the Azure CLI install below is a .deb script, and
 # libpq (for asyncpg/psycopg builds) is an apt package. Alpine would need musl
 # wheels for asyncpg and a completely different CLI install path.
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive     # pyright-python caches its Node runtime under $HOME. Actions sets
+    # HOME=/github/home for container jobs, so a warm-up landing in /root/.cache
+    # is invisible at run time and every job re-downloads Node. An absolute path
+    # makes the warm-up below actually pay off.
+    PYRIGHT_PYTHON_CACHE_DIR=/opt/pyright-cache
 
 # ── System packages (§6.1) ───────────────────────────────────────────────────
 #   curl        — required BY the Azure CLI installer, and used by health checks
@@ -59,7 +69,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The vendor .deb script rather than `pip install azure-cli`: the pip
 # distribution routinely conflicts with other packages' dependency pins, and
 # `azure/login@v2` expects the real CLI on PATH.
-RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash \
+RUN curl -fsSL https://aka.ms/InstallAzureCLIDeb | bash \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python toolchain (§6.1) ──────────────────────────────────────────────────

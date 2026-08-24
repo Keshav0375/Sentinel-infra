@@ -33,7 +33,7 @@ env:
 
 jobs:
   run-apply:
-    name: Apply
+    name: Run Apply
     runs-on: ubuntu-latest
     # A GitHub environment, so a required-reviewer rule can be switched on
     # later without touching this file. It is the only human gate between a
@@ -54,6 +54,25 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # A stopped flexible-server makes terraform ERROR with
+      # `400 ServerStoppedError` on four resources: the provider must refresh the
+      # administrators, database and azure.extensions config, and none of that
+      # reads while the server is down. AKS has no such problem.
+      #
+      # It idles STOPPED to conserve grant hours, so CI cannot assume it is up —
+      # and this has broken a run three times. Starting an already-running server
+      # is an error, not a no-op, hence the state check rather than `|| true`.
+      - name: Ensure the database is running
+        env:
+          PG_NAME: sentinel-pg-0375
+          PG_RG: sentinel-rg
+        run: |
+          state="$(az postgres flexible-server show -n "${PG_NAME}" -g "${PG_RG}" --query state -o tsv)"
+          echo "postgres: ${state}"
+          if [ "${state}" != "Ready" ]; then
+            az postgres flexible-server start -n "${PG_NAME}" -g "${PG_RG}"
+          fi
 
       - name: Initialize
         env:
