@@ -28,8 +28,8 @@ provider "github" {
 # block to add back.
 
 # READ, never own (conflict C1). sentinel-rg is created out of band by the
-# one-time bootstrap (infra.md §10 step 1) and deleted by ci_destroy_infra's
-# `az group delete` (§7.3). Were this a managed resource, `terraform destroy`
+# one-time bootstrap (infra.md §10 step 1) and deleted by the Owner-run local
+# teardown procedure (§7.3, R6). Were this a managed resource, `terraform destroy`
 # would remove it and the follow-up `az group delete` would then fail against a
 # group that no longer exists — and the first `apply` would fail too, since the
 # bootstrap has already created it.
