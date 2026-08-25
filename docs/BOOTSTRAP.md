@@ -193,7 +193,26 @@ laptop.
 
 ## Step 7 — A deployment
 
-*(Phase 6 — the workflows that make this one button press.)*
+**One button press.** Actions → *Sentinel Infra — Deploy* → Run workflow:
+
+| Field | Value |
+|---|---|
+| `deployment` | `demo1` |
+| `action` | `apply` |
+| `layer` | `deployment` |
+| `environment_name` | `dev` |
+
+Everything else is optional. That is the whole instruction — a deployment absent
+from `azure/config/deployment-config.yaml` inherits `defaults:` entirely, so no file edit is
+needed. Add a block there only when a deployment must differ.
+
+**To tear it down:** same workflow, `action: destroy`, and retype the deployment name in
+`confirm`. The retype is the only friction and it is deliberate — it is the difference between
+an irreversible action and a mis-click. The platform layer refuses to be destroyed here at all.
+
+**To pause everything without deleting:** Actions → *Sentinel — Pause / Resume*.
+
+Locally, the same thing:
 
 ```bash
 terraform workspace new demo1-dev
@@ -203,7 +222,14 @@ terraform apply -var layer=deployment -var deployment=demo1 -var environment=dev
 A deployment absent from `azure/config/deployment-config.yaml` inherits `defaults:` entirely, so
 this needs no file edit. Add a block there only when a deployment must differ.
 
-## Step 8 — Key Vault secrets
+## Step 8 — Key Vault secrets, per deployment
+
+⚠️ **Every deployment has its own vault, and every one ships empty.** The bridge reads
+`GITHUB_TOKEN` as a Key Vault reference, so until you seed it that reference resolves to the
+literal `@Microsoft.KeyVault(...)` string. The handlers detect that and log rather than crashing
+— a deployment with an unseeded vault is a *valid* state, it just cannot dispatch.
+
+Get the vault name from the deployment's outputs (`terraform output names`), then:
 
 **Terraform never writes a runtime secret.** The vault is created empty on purpose: a secret in
 state is a secret in a storage account, readable by anything with state access and visible in
@@ -228,10 +254,16 @@ expiry never fires it, so the rotation path silently does nothing.
 
 Two resources idle **stopped**, and they behave *differently* under Terraform.
 
-| Resource | Idle | `terraform plan` while stopped | Auto-restart |
-|---|---|---|---|
-| Postgres | Stopped | ❌ **errors** — `400 ServerStoppedError` | Azure restarts it after **7 days** |
-| AKS | Stopped | ✅ works | no |
+| Resource | Idle | `plan` while stopped | `apply` while stopped | Auto-restart |
+|---|---|---|---|---|
+| Postgres | Stopped | ❌ `400 ServerStoppedError` | ❌ | after **7 days** |
+| AKS | Stopped | ✅ works | ❌ `OperationNotAllowed` | no |
+
+**The AKS row is not symmetric, and that catches people.** A stopped cluster plans perfectly
+well — it exposes its whole configuration regardless of power state — and then the apply fails
+with `Operations are not allowed when the managed cluster is not in the Running power state`.
+So a change to the cluster can look completely fine right up until it doesn't. Start it before
+applying anything that touches AKS, not just before planning.
 
 **Why they differ:** the provider must *refresh* Postgres' administrators, database and
 `azure.extensions` configuration, and the control plane refuses those reads while the server is

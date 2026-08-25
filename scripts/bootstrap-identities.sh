@@ -159,6 +159,18 @@ ensure_identity "gha-plan"
 plan_pid="$(principal_of gha-plan)"
 ensure_role "${plan_pid}" "Reader" "${SUB_SCOPE}"
 ensure_role "${plan_pid}" "Storage Blob Data Reader" "${SA_SCOPE}"
+# ── Cluster access, split control-plane vs data-plane ────────────────────────
+# Cluster User Role is CONTROL plane: it permits `listClusterUserCredential`,
+# i.e. fetching a kubeconfig. On a cluster WITHOUT Entra RBAC that kubeconfig is
+# effectively cluster-wide access, and granting it here would be the same mistake
+# as granting `listCredentials` — which phase 5 refused.
+#
+# It is safe only because the platform cluster sets `azure_rbac_enabled = true`.
+# The kubeconfig then carries an exec plugin that mints an Entra token for THIS
+# identity, and the DATA-plane role below decides what that token may do.
+ensure_role "${plan_pid}" "Azure Kubernetes Service Cluster User Role" "${SUB_SCOPE}"
+ensure_role "${plan_pid}" "Azure Kubernetes Service RBAC Reader" "${SUB_SCOPE}"
+
 ensure_fic "gha-plan" "plan-pull-request" "repo:${GITHUB_OWNER}/${INFRA_REPO}:pull_request"
 ensure_fic "gha-plan" "plan-environment" "repo:${GITHUB_OWNER}/${INFRA_REPO}:environment:plan"
 
@@ -196,6 +208,11 @@ ensure_role "${deploy_pid}" "Storage Blob Data Contributor" "${SA_SCOPE}"
 # admin kubeconfig via `az aks get-credentials --admin`, which is what the
 # kubernetes provider needs in order to create namespaces.
 ensure_role "${deploy_pid}" "Azure Kubernetes Service Cluster Admin Role" "${SUB_SCOPE}"
+
+# The data-plane half. gha-deploy already holds "Cluster Admin Role" (control
+# plane, fetches the kubeconfig); this is what lets the token it mints actually
+# create namespaces, quotas and service accounts.
+ensure_role "${deploy_pid}" "Azure Kubernetes Service RBAC Cluster Admin" "${SUB_SCOPE}"
 
 ensure_fic "gha-deploy" "deploy-production" "repo:${GITHUB_OWNER}/${INFRA_REPO}:environment:production"
 ensure_fic "gha-deploy" "deploy-destroy" "repo:${GITHUB_OWNER}/${INFRA_REPO}:environment:destroy"

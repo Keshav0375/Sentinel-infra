@@ -91,12 +91,22 @@ resource "azurerm_role_assignment" "kv_admin" {
   principal_id         = var.kv_admin_object_id
 }
 
-# GHA reads secrets at incident-response time (ci_incident_response fetches LLM
-# and Datadog keys). Read-only: the pipeline has no reason to write.
+# A backend workflow reads secrets at incident-response time
+# (ci_incident_response fetches LLM and Datadog keys). Read-only: the pipeline
+# has no reason to write.
+#
+# OPTIONAL, default off, and deliberately so. The consumer is a backend workflow
+# that does not exist yet, running as an identity that does not exist yet —
+# phase 5 dropped the `repo:.../Sentinel:*` federated subjects because nothing
+# used them. Granting gha-deploy instead would be wrong: that is infra's DEPLOY
+# identity, not the backend's runtime identity, and handing it secret access it
+# never uses is how standing privilege accumulates. Flip this on in the backend
+# phase, with the principal that actually reads.
 resource "azurerm_role_assignment" "gha_kv_reader" {
+  count                = var.ci_reader_principal_id == "" ? 0 : 1
   scope                = azurerm_key_vault.sentinel.id
   role_definition_name = "Key Vault Secrets User"
-  principal_id         = var.gha_principal_id
+  principal_id         = var.ci_reader_principal_id
 
   # Set on assignments Terraform CREATES against a service principal. On a
   # post-teardown rebuild the UAMI is brand new and Entra replication

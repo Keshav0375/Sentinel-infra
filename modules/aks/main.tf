@@ -55,6 +55,33 @@ resource "azurerm_kubernetes_cluster" "sentinel" {
     }
   }
 
+  # ── Entra-integrated Kubernetes RBAC ──────────────────────────────────────
+  # This is what makes fetching a kubeconfig SAFE, and it is the reason phase 6
+  # could give the plan identity cluster access at all.
+  #
+  # WITHOUT azure_rbac_enabled, the kubeconfig from `listClusterUserCredential`
+  # is effectively cluster-wide access. Handing that to gha-plan — the identity
+  # any pull request can trigger — would be the same mistake as granting it
+  # `listCredentials`, which phase 5 refused for exactly this reason.
+  #
+  # WITH it, the kubeconfig carries an exec plugin that mints an Entra token for
+  # the CALLING identity, and Azure RBAC decides what that token may do:
+  #   gha-plan   → AKS RBAC Reader        (list namespaces, change nothing)
+  #   gha-deploy → AKS RBAC Cluster Admin (create namespaces)
+  #
+  # Future hardening, deliberately not done now: `local_account_disabled = true`
+  # removes the admin bypass entirely, but locks out recovery if the Entra path
+  # breaks. Worth revisiting once the workflows have run for a while.
+  # The provider requires either `tenant_id` or `admin_group_object_ids`.
+  # admin_group_object_ids is not an option: creating an Entra security group is
+  # a directory write, and the school tenant denies those at policy — the same
+  # constraint that killed the `sentinel-db-admins` group in phase 2 (B10).
+  # So access is governed purely by Azure RBAC role assignments.
+  azure_active_directory_role_based_access_control {
+    azure_rbac_enabled = true
+    tenant_id          = var.tenant_id
+  }
+
   identity {
     type = "SystemAssigned"
   }

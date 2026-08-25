@@ -73,16 +73,18 @@ variable "pg_admin_principal_name" {
   type        = string
 }
 
-# NOTE: `kv_admin_object_id` is deliberately absent until phase 6.
-#
-# Key Vault is a DEPLOYMENT-layer resource, so nothing consumes this yet, and an
-# unused variable is the same dead weight as an unused provider. When it returns:
-# it must NEVER be data.azurerm_client_config.current.object_id — under CI that
-# resolves to the pipeline identity and silently strips the human's Secrets
-# Officer rights.
+variable "kv_admin_object_id" {
+  description = "Object ID granted Key Vault Secrets Officer on each deployment's vault — the human who seeds secrets by hand. Deliberately separate from pg_admin_object_id: the same person today need not be the same person forever. NEVER data.azurerm_client_config.current.object_id — under CI that resolves to the pipeline identity and silently strips the human's access."
+  type        = string
+}
 
 variable "state_storage_account" {
   description = "State storage account, used by the deployment layer's remote-state lookup of the platform. Must match backend.tf, which cannot interpolate variables."
   type        = string
   default     = "stsentineltfb7fa37"
 }
+
+# NOTE: `identity_client_id`, `identity_use_oidc` and `github_owner` were removed
+# on 2026-08-25 along with identity.tf and the azuread provider. Nothing reads
+# them, and tflint is right that an unused variable is the same dead weight as an
+# unused provider. They return together when the identity tenant is wired.

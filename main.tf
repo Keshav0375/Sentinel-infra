@@ -17,12 +17,23 @@ provider "azurerm" {
   features {}
 }
 
-# NOTE: there is deliberately no `azuread` provider here yet.
+# NOTE: there is deliberately NO `azuread` provider here, and identity.tf is
+# deleted — restored from commit 65e35b9 when the identity tenant is wired.
 #
-# It returns in phase 6, aliased to the IDENTITY tenant, when the per-deployment
-# app registrations land. Declaring it now would be dead weight the lock file
-# still pins and tflint still flags — the same reasoning versions.tf used in
-# phase 1, when the identity plane had not yet arrived.
+# The per-deployment app registrations were written and work. They are not
+# shipped because Terraform CONFIGURES a declared provider whether or not any
+# resource of that provider is planned — `count = 0` on every resource is not
+# enough. So an azuread provider that cannot authenticate breaks EVERY plan,
+# including the platform's, with an error about the identity tenant that has
+# nothing to do with what you were changing.
+#
+# Phase 5 recorded that an unused provider is dead weight the lock file still
+# pins. This is the same lesson with teeth: it is not merely dead weight, it is
+# actively fatal.
+#
+# To restore: create federated credentials on `sentinel-tf-identity` for
+# `environment:plan|production|destroy` (docs/BOOTSTRAP.md step 4), then bring
+# back identity.tf and this provider block together.
 
 locals {
   is_platform   = var.layer == "platform"

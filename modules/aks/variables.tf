@@ -28,3 +28,8 @@ variable "node_vm_size" {
   type        = string
   default     = "Standard_B2pls_v2"
 }
+
+variable "tenant_id" {
+  description = "Entra tenant for Kubernetes RBAC. Pinned from the root rather than read from the ambient az context — a cross-tenant login would otherwise repoint the cluster's trust."
+  type        = string
+}

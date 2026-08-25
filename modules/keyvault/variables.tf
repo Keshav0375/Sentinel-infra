@@ -33,14 +33,10 @@ variable "kv_admin_object_id" {
   }
 }
 
-variable "gha_principal_id" {
-  description = "Principal ID of the sentinel-gha UAMI. Read-only access — CI fetches LLM and Datadog keys at incident-response time but never writes."
+variable "ci_reader_principal_id" {
+  description = "Principal granted Key Vault Secrets User so a backend workflow can read LLM/Datadog keys at incident time. Empty disables the grant — the consuming workflow and its identity do not exist until the backend phase."
   type        = string
-
-  validation {
-    condition     = can(regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", var.gha_principal_id))
-    error_message = "gha_principal_id must be a GUID — the UAMI's principalId, NOT its clientId."
-  }
+  default     = ""
 }
 
 # Deferred to phase 3, same pattern as the Postgres backend admin (task 2.2).

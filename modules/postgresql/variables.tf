@@ -64,3 +64,27 @@ variable "backend_uami_principal_id" {
     error_message = "enable_backend_admin is true, so backend_uami_principal_id must be set (phase 3 task 3.1 supplies it)."
   }
 }
+
+variable "sku_name" {
+  description = "Compute SKU. B_Standard_B1ms is the cheapest burstable that fits the student grant."
+  type        = string
+  default     = "B_Standard_B1ms"
+}
+
+variable "storage_mb" {
+  description = "Storage in MB. Azure allows growth but NEVER shrinking — a value set too high cannot be undone without recreating the server."
+  type        = number
+  default     = 32768
+}
+
+variable "database_name" {
+  description = "Application database on this server. In `shared` mode each deployment gets its own database here rather than its own server."
+  type        = string
+  default     = "sentinel"
+}
+
+variable "backend_uami_principal_name" {
+  description = "Display name of the workload identity attached as a second Entra administrator. Postgres stores it verbatim as the role name, so it must match the UAMI exactly."
+  type        = string
+  default     = "sentinel-backend-wi"
+}

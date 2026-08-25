@@ -33,8 +33,8 @@ resource "azurerm_postgresql_flexible_server" "sentinel" {
   location            = var.location
 
   version    = "16"
-  sku_name   = "B_Standard_B1ms"
-  storage_mb = 32768
+  sku_name   = var.sku_name
+  storage_mb = var.storage_mb
   zone       = "1"
 
   # No administrator_login / administrator_password. Entra-only (rev-5): a stolen
@@ -87,7 +87,7 @@ resource "azurerm_postgresql_flexible_server_active_directory_administrator" "ba
   resource_group_name = var.resource_group_name
   tenant_id           = var.tenant_id
   object_id           = var.backend_uami_principal_id
-  principal_name      = "sentinel-backend-wi"
+  principal_name      = var.backend_uami_principal_name
   principal_type      = "ServicePrincipal"
 
   depends_on = [azurerm_postgresql_flexible_server.sentinel]
@@ -95,7 +95,7 @@ resource "azurerm_postgresql_flexible_server_active_directory_administrator" "ba
 
 # ── Database ──────────────────────────────────────────────────────────────────
 resource "azurerm_postgresql_flexible_server_database" "sentinel" {
-  name      = "sentinel"
+  name      = var.database_name
   server_id = azurerm_postgresql_flexible_server.sentinel.id
   charset   = "UTF8"
   collation = "en_US.utf8"

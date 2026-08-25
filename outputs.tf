@@ -75,6 +75,14 @@ output "postgres_fqdn" {
   value       = try(module.postgresql[0].db_host, null)
 }
 
+# Consumed by: deployments in `database.mode: shared`, which create a database
+# on this server without holding the server in their own state — so destroying a
+# deployment removes its database and cannot reach the server.
+output "postgres_server_id" {
+  description = "Resource ID of the shared Postgres server."
+  value       = try(module.postgresql[0].server_id, null)
+}
+
 output "postgres_admin_principal" {
   description = "The human Entra administrator, so a deployment can grant its own role without re-deriving it."
   value       = try(var.pg_admin_principal_name, null)
