@@ -258,6 +258,7 @@ jobs:
           TF_LOCATION: ${{ vars.AZURE_LOCATION }}
           TF_PG_ADMIN_OBJECT_ID: ${{ vars.PG_ADMIN_OBJECT_ID }}
           TF_PG_ADMIN_PRINCIPAL_NAME: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
+          TF_KV_ADMIN_OBJECT_ID: ${{ vars.KV_ADMIN_OBJECT_ID }}
         run: |
           terraform plan -no-color -input=false -lock=false -refresh=false \
             -var="layer=${TF_LAYER}" \
@@ -266,7 +267,7 @@ jobs:
             -var="subscription_id=${TF_SUBSCRIPTION_ID}" \
             -var="location=${TF_LOCATION}" \
             -var="pg_admin_object_id=${TF_PG_ADMIN_OBJECT_ID}" \
-            -var="pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}"
+            -var="pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}" \n            -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}"
 
       - name: Comment plan on the pull request
         if: github.event_name == 'pull_request'
