@@ -18,3 +18,8 @@ output "db_port" {
 # (audience https://ossrdbms-aad.database.windows.net) and present it as the psql
 # password. Adding a password output here would require re-introducing password
 # auth, which rev-5 removed on purpose.
+
+output "server_id" {
+  description = "Resource ID of the flexible server. The deployment layer addresses it to create a database on the SHARED server without holding the server itself in its own state."
+  value       = azurerm_postgresql_flexible_server.sentinel.id
+}

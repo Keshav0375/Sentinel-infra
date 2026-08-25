@@ -33,6 +33,12 @@ terraform {
       source  = "hashicorp/azuread"
       version = "~> 3.0"
     }
+    # Arrives with the namespaces in phase 6. Authenticated by an Entra token via
+    # kubelogin rather than a downloaded admin credential — see namespace.tf.
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.0"
+    }
     azurerm = {
       source  = "hashicorp/azurerm"
       version = "~> 4.0"
