@@ -73,16 +73,31 @@ variable "pg_admin_principal_name" {
   type        = string
 }
 
-# NOTE: `kv_admin_object_id` is deliberately absent until phase 6.
-#
-# Key Vault is a DEPLOYMENT-layer resource, so nothing consumes this yet, and an
-# unused variable is the same dead weight as an unused provider. When it returns:
-# it must NEVER be data.azurerm_client_config.current.object_id — under CI that
-# resolves to the pipeline identity and silently strips the human's Secrets
-# Officer rights.
+variable "kv_admin_object_id" {
+  description = "Object ID granted Key Vault Secrets Officer on each deployment's vault — the human who seeds secrets by hand. Deliberately separate from pg_admin_object_id: the same person today need not be the same person forever. NEVER data.azurerm_client_config.current.object_id — under CI that resolves to the pipeline identity and silently strips the human's access."
+  type        = string
+}
 
 variable "state_storage_account" {
   description = "State storage account, used by the deployment layer's remote-state lookup of the platform. Must match backend.tf, which cannot interpolate variables."
   type        = string
   default     = "stsentineltfb7fa37"
+}
+
+variable "identity_client_id" {
+  description = "`sentinel-tf-identity`'s client ID, for the aliased azuread provider under CI. Empty locally, where the az CLI context is used instead."
+  type        = string
+  default     = ""
+}
+
+variable "identity_use_oidc" {
+  description = "Authenticate the azuread provider by GitHub OIDC. False locally; true in CI."
+  type        = bool
+  default     = false
+}
+
+variable "github_owner" {
+  description = "GitHub owner. Load-bearing for federated subjects — Azure matches them case-sensitively."
+  type        = string
+  default     = "Keshav0375"
 }

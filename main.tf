@@ -17,12 +17,20 @@ provider "azurerm" {
   features {}
 }
 
-# NOTE: there is deliberately no `azuread` provider here yet.
+# The IDENTITY tenant (R4). The school tenant sets `allowedToCreateApps: false`
+# at policy, so the per-deployment app registrations live in a separate,
+# personally-owned tenant. Aliased because everything else is school-side.
 #
-# It returns in phase 6, aliased to the IDENTITY tenant, when the per-deployment
-# app registrations land. Declaring it now would be dead weight the lock file
-# still pins and tflint still flags — the same reasoning versions.tf used in
-# phase 1, when the identity plane had not yet arrived.
+# Auth: locally this falls back to the `az` CLI context, which works because the
+# school account is a redeemed guest holding Application Administrator there.
+# From CI it needs `sentinel-tf-identity` plus federated credentials for the
+# `environment:*` subjects — which is why identity.tf ships OFF by default.
+provider "azuread" {
+  alias     = "identity"
+  tenant_id = var.identity_tenant_id
+  client_id = var.identity_client_id != "" ? var.identity_client_id : null
+  use_oidc  = var.identity_use_oidc
+}
 
 locals {
   is_platform   = var.layer == "platform"

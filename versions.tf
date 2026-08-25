@@ -26,6 +26,13 @@ terraform {
   required_version = ">= 1.9"
 
   required_providers {
+    # Returns in phase 6 with its first consumer: the per-deployment app
+    # registrations in identity.tf. Aliased to the IDENTITY tenant — the school
+    # tenant denies app creation at policy.
+    azuread = {
+      source  = "hashicorp/azuread"
+      version = "~> 3.0"
+    }
     azurerm = {
       source  = "hashicorp/azurerm"
       version = "~> 4.0"
