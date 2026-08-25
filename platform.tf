@@ -74,6 +74,7 @@ module "aks" {
   cluster_name        = module.naming.names.aks_cluster
   dns_prefix          = module.naming.names.aks_dns_prefix
   node_vm_size        = try(local.cfg.aks.vm_size, "Standard_B2pls_v2")
+  tenant_id           = var.tenant_id
   acr_id              = module.acr[0].acr_id
 }
 

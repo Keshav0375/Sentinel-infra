@@ -228,10 +228,16 @@ expiry never fires it, so the rotation path silently does nothing.
 
 Two resources idle **stopped**, and they behave *differently* under Terraform.
 
-| Resource | Idle | `terraform plan` while stopped | Auto-restart |
-|---|---|---|---|
-| Postgres | Stopped | ❌ **errors** — `400 ServerStoppedError` | Azure restarts it after **7 days** |
-| AKS | Stopped | ✅ works | no |
+| Resource | Idle | `plan` while stopped | `apply` while stopped | Auto-restart |
+|---|---|---|---|---|
+| Postgres | Stopped | ❌ `400 ServerStoppedError` | ❌ | after **7 days** |
+| AKS | Stopped | ✅ works | ❌ `OperationNotAllowed` | no |
+
+**The AKS row is not symmetric, and that catches people.** A stopped cluster plans perfectly
+well — it exposes its whole configuration regardless of power state — and then the apply fails
+with `Operations are not allowed when the managed cluster is not in the Running power state`.
+So a change to the cluster can look completely fine right up until it doesn't. Start it before
+applying anything that touches AKS, not just before planning.
 
 **Why they differ:** the provider must *refresh* Postgres' administrators, database and
 `azure.extensions` configuration, and the control plane refuses those reads while the server is
