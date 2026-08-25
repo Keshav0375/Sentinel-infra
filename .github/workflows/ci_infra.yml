@@ -1,19 +1,22 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Deploy — the only automated writer of Sentinel's Azure estate.
-# architecture/infra.md §7.2 (superseded — see decisions.md 2026-08-24)
+# Deploy — creates and destroys deployments. The only automated writer.
 #
 # ── Dispatch only, and that is a consequence not a preference ────────────────
 # Push-to-main auto-apply cannot survive multi-deployment: a push has no way to
-# know WHICH deployment it means. Every apply is now a deliberate button press,
-# and no identity carries a `ref:refs/heads/main` subject any more.
+# know WHICH deployment it means. No identity carries a branch subject any more.
 #
 # ── The environment is the security boundary ─────────────────────────────────
-# Declaring `environment: production` rewrites the OIDC subject to
-# `repo:<owner>/<repo>:environment:production`, replacing the branch form. That
-# is the ONLY subject gha-deploy federates on, and GitHub will not mint it for a
-# `pull_request` event — so the identity that can create and destroy the
-# subscription's contents is unreachable from a PR by construction, not by a
-# rule someone could misconfigure.
+# Declaring `environment: X` rewrites the OIDC subject to
+# `repo:<owner>/<repo>:environment:X`, replacing the branch form. Those are the
+# only subjects gha-deploy federates on, and GitHub will not mint them for a
+# `pull_request` — so the identity that can destroy the subscription's contents
+# is unreachable from a PR by construction, not by a rule someone could
+# misconfigure.
+#
+# Apply and destroy use DIFFERENT environments, so a required reviewer can be
+# attached to destruction alone. One job with an expression rather than two jobs:
+# duplicating every step is how the two paths drift, and destroy is meant to be
+# the same code path with a different credential.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: "Sentinel Infra — Deploy"
@@ -21,35 +24,43 @@ name: "Sentinel Infra — Deploy"
 on:
   workflow_dispatch:
     inputs:
-      layer:
-        description: 'Which layer to apply.'
+      deployment:
+        description: 'Deployment name. 2-8 lowercase alphanumeric. This is the only input you must set.'
+        type: string
+        required: true
+        default: sentinel
+      action:
+        description: 'plan-only = show the diff and stop · apply = create/update · destroy = tear down · refresh-only = reconcile state'
         type: choice
         required: true
-        default: platform
-        options: [platform, deployment]
-      deployment:
-        description: 'Deployment name (deployment layer only). 2-8 lowercase alphanumeric.'
-        type: string
-        required: false
-        default: sentinel
+        default: plan-only
+        options: [plan-only, apply, destroy, refresh-only]
+      layer:
+        description: 'platform = the shared cluster/registry/database · deployment = one isolated deployment'
+        type: choice
+        required: true
+        default: deployment
+        options: [deployment, platform]
       environment_name:
         description: 'Environment within the deployment. The platform layer uses `plat`.'
         type: string
         required: false
-        default: plat
-      mode:
-        description: 'apply = write · plan-only = show the diff and stop · refresh-only = reconcile state with reality'
-        type: choice
-        required: true
-        default: plan-only
-        options: [plan-only, apply, refresh-only]
+        default: dev
+      confirm:
+        description: 'DESTROY ONLY — retype the deployment name exactly. Anything else aborts.'
+        type: string
+        required: false
+        default: ''
+      target:
+        description: 'Optional single resource address for -target. Escape hatch; leave blank.'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   id-token: write
   contents: read
 
-# Never cancel an in-flight apply — a killed apply leaves the state lease held
-# and the infrastructure half-changed. Queue instead.
 concurrency:
   group: infra-apply
   cancel-in-progress: false
@@ -59,10 +70,38 @@ env:
 
 jobs:
   run-deploy:
-    name: Run Deploy
+    name: ${{ inputs.action == 'destroy' && 'Run Destroy' || 'Run Deploy' }}
     runs-on: ubuntu-latest
-    environment: production
+
+    # Destruction gets its own environment, so its approval rules are its own.
+    environment: ${{ inputs.action == 'destroy' && 'destroy' || 'production' }}
+
     steps:
+      # ── Guards, BEFORE authenticating ────────────────────────────────────
+      # A refused destroy should cost nothing and reach nothing. Checking after
+      # azure/login would mean a token was minted for a run that was never going
+      # to be allowed.
+      - name: Check destroy guards
+        if: inputs.action == 'destroy'
+        env:
+          DEPLOYMENT: ${{ inputs.deployment }}
+          CONFIRM: ${{ inputs.confirm }}
+          LAYER: ${{ inputs.layer }}
+        run: |
+          if [ "${LAYER}" = "platform" ]; then
+            echo "::error::The platform layer cannot be destroyed from this workflow."
+            echo "::error::It is shared by every deployment; tearing it down is a deliberate"
+            echo "::error::local procedure (docs/BOOTSTRAP.md), not a button."
+            exit 1
+          fi
+          if [ "${CONFIRM}" != "${DEPLOYMENT}" ]; then
+            echo "::error::confirm ('${CONFIRM}') does not match deployment ('${DEPLOYMENT}')."
+            echo "::error::Retype the deployment name exactly. This is the only thing standing"
+            echo "::error::between a mis-click and an irreversible action."
+            exit 1
+          fi
+          echo "destroy confirmed for ${DEPLOYMENT}"
+
       - name: Check out
         uses: actions/checkout@v4
 
@@ -71,6 +110,13 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      # The kubernetes provider authenticates by Entra token via kubelogin
+      # rather than a downloaded admin credential. Runners do not ship it.
+      - name: Set up kubelogin
+        uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: 'v0.1.3'
+
       - name: Log in to Azure
         uses: azure/login@v2
         with:
@@ -78,26 +124,48 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # Unlike the plan job, this one CAN start the database — gha-deploy holds
-      # Contributor. A stopped flexible-server errors terraform with
-      # `400 ServerStoppedError`, and stopped is its NORMAL idle state, so an
-      # apply that did not check would fail most of the time.
-      #
-      # Starting an already-running server is an error rather than a no-op, hence
-      # the state check rather than `|| true`.
-      - name: Ensure the database is running
+      # The checks a plan structurally cannot make. Runs here rather than in the
+      # PR preflight because name availability is a POST */action that the plan
+      # identity cannot perform — and these are the ones that must not fail
+      # mid-apply.
+      - name: Preflight
+        if: inputs.action == 'apply'
+        env:
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
         run: |
-          server="$(az postgres flexible-server list --query "[0].name" -o tsv)"
-          if [ -z "${server}" ]; then
-            echo "no flexible-server yet — first apply will create it"
-            exit 0
-          fi
-          rg="$(az postgres flexible-server list --query "[0].resourceGroup" -o tsv)"
-          state="$(az postgres flexible-server show -n "${server}" -g "${rg}" --query state -o tsv)"
-          echo "postgres ${server}: ${state}"
-          if [ "${state}" != "Ready" ]; then
-            az postgres flexible-server start -n "${server}" -g "${rg}"
-          fi
+          ./scripts/preflight.sh --mode apply \
+            --deployment "${{ inputs.deployment }}" \
+            --environment "${{ inputs.environment_name }}"
+
+      # Unlike the PR plan, this identity CAN start the database. Stopped is its
+      # normal idle state, so an apply that did not check would fail most of the
+      # time. Iterates every server: `database.mode: dedicated` means there can
+      # be several.
+      - name: Ensure databases are running
+        run: |
+          while IFS=$'\t' read -r name rg; do
+            [ -n "${name}" ] || continue
+            state="$(az postgres flexible-server show -n "${name}" -g "${rg}" --query state -o tsv)"
+            echo "postgres ${name}: ${state}"
+            if [ "${state}" != "Ready" ]; then
+              az postgres flexible-server start -n "${name}" -g "${rg}" -o none
+            fi
+          done <<< "$(az postgres flexible-server list --query "[].[name,resourceGroup]" -o tsv)"
+
+      # A stopped cluster PLANS fine and then fails the apply with
+      # `OperationNotAllowed`. The asymmetry is why this checks rather than
+      # assuming the plan's success meant anything.
+      - name: Ensure the cluster is running
+        run: |
+          while IFS=$'\t' read -r name rg; do
+            [ -n "${name}" ] || continue
+            state="$(az aks show -g "${rg}" -n "${name}" --query powerState.code -o tsv)"
+            echo "aks ${name}: ${state}"
+            if [ "${state}" != "Running" ]; then
+              echo "starting (5-10 min)"
+              az aks start -g "${rg}" -n "${name}"
+            fi
+          done <<< "$(az aks list --query "[].[name,resourceGroup]" -o tsv)"
 
       - name: Initialize
         env:
@@ -116,25 +184,35 @@ jobs:
           TF_LAYER: ${{ inputs.layer }}
           TF_DEPLOYMENT: ${{ inputs.deployment }}
           TF_ENVIRONMENT: ${{ inputs.environment_name }}
-        # A deployment gets its OWN workspace, and that is the safety property:
-        # its state contains no platform resource, so destroying it cannot reach
-        # the shared cluster.
         run: |
-          if [ "${TF_LAYER}" = "platform" ]; then
-            ws=platform
-          else
-            ws="${TF_DEPLOYMENT}-${TF_ENVIRONMENT}"
-          fi
+          if [ "${TF_LAYER}" = "platform" ]; then ws=platform; else ws="${TF_DEPLOYMENT}-${TF_ENVIRONMENT}"; fi
           echo "workspace: ${ws}"
+          echo "TF_WORKSPACE_NAME=${ws}" >> "$GITHUB_ENV"
           terraform workspace select "${ws}" 2>/dev/null || terraform workspace new "${ws}"
 
-      - name: Deploy
+      # ── Capture the vault name BEFORE destroying the state that holds it ──
+      # The purge below needs a name that only exists in the state `destroy` is
+      # about to remove. Reading it afterwards would be reading nothing.
+      - name: Capture vault name
+        if: inputs.action == 'destroy'
         env:
           ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           ARM_USE_OIDC: "true"
-          TF_MODE: ${{ inputs.mode }}
+        run: |
+          kv="$(terraform output -json names 2>/dev/null | jq -r '.key_vault // empty')"
+          echo "vault to purge after destroy: ${kv:-<none>}"
+          echo "KV_TO_PURGE=${kv}" >> "$GITHUB_ENV"
+
+      - name: ${{ inputs.action == 'destroy' && 'Destroy' || 'Deploy' }}
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+          TF_ACTION: ${{ inputs.action }}
+          TF_TARGET: ${{ inputs.target }}
           TF_LAYER: ${{ inputs.layer }}
           TF_DEPLOYMENT: ${{ inputs.deployment }}
           TF_ENVIRONMENT: ${{ inputs.environment_name }}
@@ -142,14 +220,18 @@ jobs:
           TF_LOCATION: ${{ vars.AZURE_LOCATION }}
           TF_PG_ADMIN_OBJECT_ID: ${{ vars.PG_ADMIN_OBJECT_ID }}
           TF_PG_ADMIN_PRINCIPAL_NAME: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
-        # `plan-only` is the default deliberately: the destructive option should
-        # be the one you choose, not the one you get by pressing Enter.
+          TF_KV_ADMIN_OBJECT_ID: ${{ vars.KV_ADMIN_OBJECT_ID }}
+          TF_IDENTITY_CLIENT_ID: ${{ vars.AZURE_IDENTITY_CLIENT_ID }}
+        # plan-only is the DEFAULT deliberately: the destructive options should
+        # be ones you choose, not ones you get by pressing Enter.
         run: |
           args=(-no-color -input=false)
-          case "${TF_MODE}" in
+          if [ -n "${TF_TARGET}" ]; then args+=("-target=${TF_TARGET}"); fi
+          case "${TF_ACTION}" in
             plan-only)    verb=plan ;;
-            refresh-only) verb=apply; args+=(-auto-approve -refresh-only) ;;
-            *)            verb=apply; args+=(-auto-approve) ;;
+            destroy)      verb=destroy; args+=(-auto-approve) ;;
+            refresh-only) verb=apply;   args+=(-auto-approve -refresh-only) ;;
+            *)            verb=apply;   args+=(-auto-approve) ;;
           esac
           echo "running: terraform ${verb} ${args[*]}"
           terraform "${verb}" "${args[@]}" \
@@ -159,4 +241,61 @@ jobs:
             -var="subscription_id=${TF_SUBSCRIPTION_ID}" \
             -var="location=${TF_LOCATION}" \
             -var="pg_admin_object_id=${TF_PG_ADMIN_OBJECT_ID}" \
-            -var="pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}"
+            -var="pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}" \
+            -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}" \
+            -var="identity_client_id=${TF_IDENTITY_CLIENT_ID}" \
+            -var="identity_use_oidc=true"
+
+      # ── Purge, or the name is held for 7 days ────────────────────────────
+      # The azurerm provider purges on destroy by default, so this is a
+      # belt-and-braces sweep for a vault left soft-deleted by an interrupted
+      # run. Without it, recreating the same deployment fails on a vault nobody
+      # can see — which is exactly the destroy → recreate cycle this platform
+      # exists to support.
+      - name: Purge the vault
+        if: inputs.action == 'destroy'
+        env:
+          LOCATION: ${{ vars.AZURE_LOCATION }}
+        run: |
+          if [ -z "${KV_TO_PURGE:-}" ]; then
+            echo "no vault name captured — nothing to purge"
+            exit 0
+          fi
+          if az keyvault list-deleted --query "[?name=='${KV_TO_PURGE}'].name" -o tsv | grep -q .; then
+            echo "purging ${KV_TO_PURGE}"
+            az keyvault purge --name "${KV_TO_PURGE}" --location "${LOCATION}"
+          else
+            echo "${KV_TO_PURGE} is already fully deleted (the provider purges on destroy)"
+          fi
+
+      # A workspace left behind after a destroy is an empty state file that
+      # makes `terraform workspace list` lie about what exists.
+      - name: Remove the empty workspace
+        if: inputs.action == 'destroy'
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+        run: |
+          terraform workspace select platform
+          terraform workspace delete "${TF_WORKSPACE_NAME}" || \
+            echo "::warning::workspace ${TF_WORKSPACE_NAME} not empty; left in place"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ inputs.action }} · ${{ inputs.deployment }} (${{ inputs.layer }})"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| workspace | \`${TF_WORKSPACE_NAME:-unknown}\` |"
+            echo "| environment | \`${{ inputs.action == 'destroy' && 'destroy' || 'production' }}\` |"
+            if [ "${{ inputs.action }}" = "apply" ]; then
+              echo ""
+              echo "⚠️ The Key Vault ships **empty** — Terraform writes no secrets, because a"
+              echo "secret in state is readable by anything with state access. The bridge cannot"
+              echo "dispatch until they are seeded. See \`docs/BOOTSTRAP.md\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

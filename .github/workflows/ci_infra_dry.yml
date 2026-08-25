@@ -58,6 +58,38 @@ env:
   TF_VERSION: "1.15.8"
 
 jobs:
+  # ── Preflight ────────────────────────────────────────────────────────────
+  # A plan cannot prove an apply will succeed. This covers what it structurally
+  # cannot see — quota, SKU availability, provider registration, whether the
+  # database is awake. Every check here maps to a failure this project actually
+  # hit.
+  #
+  # Runs under gha-plan, so it gets only the checks Reader can perform. The
+  # name-availability checks are POST */action and live in the deploy workflow
+  # instead; widening this identity to satisfy a checklist was rejected.
+  run-preflight:
+    name: Run Preflight
+    runs-on: ubuntu-latest
+    environment: plan
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Preflight
+        env:
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+        run: ./scripts/preflight.sh --mode plan
+
   run-validate:
     name: Run Validate
     runs-on: ubuntu-latest
@@ -91,7 +123,7 @@ jobs:
 
   run-plan:
     name: Run Plan
-    needs: run-validate
+    needs: [run-validate, run-preflight]
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
@@ -115,6 +147,14 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+
+      # The kubernetes provider authenticates by Entra token rather than a
+      # downloaded admin credential, which needs kubelogin on PATH. Runners do
+      # not ship it.
+      - name: Set up kubelogin
+        uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: 'v0.1.3'
 
       - name: Log in to Azure
         uses: azure/login@v2
