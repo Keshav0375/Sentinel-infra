@@ -17,20 +17,23 @@ provider "azurerm" {
   features {}
 }
 
-# The IDENTITY tenant (R4). The school tenant sets `allowedToCreateApps: false`
-# at policy, so the per-deployment app registrations live in a separate,
-# personally-owned tenant. Aliased because everything else is school-side.
+# NOTE: there is deliberately NO `azuread` provider here, and identity.tf is
+# deleted — restored from commit 65e35b9 when the identity tenant is wired.
 #
-# Auth: locally this falls back to the `az` CLI context, which works because the
-# school account is a redeemed guest holding Application Administrator there.
-# From CI it needs `sentinel-tf-identity` plus federated credentials for the
-# `environment:*` subjects — which is why identity.tf ships OFF by default.
-provider "azuread" {
-  alias     = "identity"
-  tenant_id = var.identity_tenant_id
-  client_id = var.identity_client_id != "" ? var.identity_client_id : null
-  use_oidc  = var.identity_use_oidc
-}
+# The per-deployment app registrations were written and work. They are not
+# shipped because Terraform CONFIGURES a declared provider whether or not any
+# resource of that provider is planned — `count = 0` on every resource is not
+# enough. So an azuread provider that cannot authenticate breaks EVERY plan,
+# including the platform's, with an error about the identity tenant that has
+# nothing to do with what you were changing.
+#
+# Phase 5 recorded that an unused provider is dead weight the lock file still
+# pins. This is the same lesson with teeth: it is not merely dead weight, it is
+# actively fatal.
+#
+# To restore: create federated credentials on `sentinel-tf-identity` for
+# `environment:plan|production|destroy` (docs/BOOTSTRAP.md step 4), then bring
+# back identity.tf and this provider block together.
 
 locals {
   is_platform   = var.layer == "platform"
