@@ -133,7 +133,9 @@ jobs:
         env:
           AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
         run: |
-          ./scripts/preflight.sh --mode apply \
+          # `bash` rather than direct execution — the exec bit does not survive a
+          # Windows checkout, and the failure is CI-only.
+          bash ./scripts/preflight.sh --mode apply \
             --deployment "${{ inputs.deployment }}" \
             --environment "${{ inputs.environment_name }}"
 

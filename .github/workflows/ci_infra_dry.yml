@@ -88,7 +88,11 @@ jobs:
       - name: Preflight
         env:
           AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
-        run: ./scripts/preflight.sh --mode plan
+        # Invoked through `bash` rather than executed directly. The exec bit does
+        # not survive a Windows checkout — `chmod +x` there is a no-op as far as
+        # git is concerned, and the failure is `Permission denied` in CI only.
+        # The mode bit IS set in the index too; this is the belt to that braces.
+        run: bash ./scripts/preflight.sh --mode plan
 
   run-validate:
     name: Run Validate

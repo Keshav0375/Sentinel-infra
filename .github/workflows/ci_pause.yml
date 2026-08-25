@@ -65,4 +65,6 @@ jobs:
         env:
           ACTION: ${{ inputs.action }}
           SCOPE: ${{ inputs.scope }}
-        run: ./scripts/pause.sh --action "${ACTION}" --scope "${SCOPE}"
+        # `bash` rather than direct execution — the exec bit does not survive a
+        # Windows checkout, and the failure is CI-only.
+        run: bash ./scripts/pause.sh --action "${ACTION}" --scope "${SCOPE}"
