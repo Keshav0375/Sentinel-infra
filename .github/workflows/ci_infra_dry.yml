@@ -180,7 +180,26 @@ jobs:
       # command line: `${{ }}` spliced into a `run:` block is the standard
       # Actions script-injection surface.
       #
-      # -lock=false because gha-plan holds blob READER. See the header.
+      # ── Why -refresh=false, and why that is the SAFE choice ─────────────
+      # The azurerm provider refreshes ACR and AKS by calling
+      #   Microsoft.ContainerRegistry/registries/listCredentials/action
+      #   Microsoft.ContainerService/managedClusters/listClusterUserCredential/action
+      # because `admin_password` and `kube_config` are resource attributes.
+      # Reader grants `*/read` and NO action at all, so a read-only identity
+      # structurally cannot refresh those two types. Found live 2026-08-25.
+      #
+      # The obvious fix — grant gha-plan those two actions — was rejected. Both
+      # return SECRETS: the registry admin password and a cluster admin
+      # kubeconfig. Handing those to the one identity a pull request can trigger
+      # is a much worse trade than anything it buys.
+      #
+      # So the PR plan compares configuration against RECORDED STATE rather than
+      # against live Azure. Stated honestly: it will not show drift someone
+      # introduced through the portal. It still answers the question a PR plan
+      # exists to answer — what does this change do — and the apply job runs
+      # under gha-deploy with a full refresh, so drift surfaces there.
+      #
+      # -lock=false for the same root cause: a state lock is a blob WRITE.
       - name: Plan
         id: plan
         env:
@@ -196,7 +215,7 @@ jobs:
           TF_PG_ADMIN_OBJECT_ID: ${{ vars.PG_ADMIN_OBJECT_ID }}
           TF_PG_ADMIN_PRINCIPAL_NAME: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
         run: |
-          terraform plan -no-color -input=false -lock=false \
+          terraform plan -no-color -input=false -lock=false -refresh=false \
             -var="layer=${TF_LAYER}" \
             -var="deployment=${TF_DEPLOYMENT}" \
             -var="environment=${TF_ENVIRONMENT}" \
