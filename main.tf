@@ -1,126 +1,81 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# sentinel-infra — root providers and shared data sources.
+# Providers, config, and the layer switch.
 #
-# Resource modules are wired in from phase 2 onward. This file establishes the
-# provider contract they all inherit; it creates nothing itself.
+# ── One root, two layers ─────────────────────────────────────────────────────
+# `var.layer` selects what a workspace manages. Two separate root directories
+# were considered and rejected: that means two provider blocks, two lock files
+# and two `init` paths to keep in step, for one boolean's worth of separation.
+#
+# The layers are separated where it matters instead — in STATE. `platform` is its
+# own workspace; each deployment is its own workspace. That is a safety property
+# rather than a preference: in a single state, destroying a deployment would take
+# the shared cluster with it.
 # ─────────────────────────────────────────────────────────────────────────────
 
 provider "azurerm" {
-  features {}
-
-  # Mandatory under azurerm v4. Taken from a variable rather than ambient
-  # ARM_SUBSCRIPTION_ID so that a local run and a CI run resolve identically and
-  # a mistake is visible in the plan rather than in the environment.
   subscription_id = var.subscription_id
+  features {}
 }
 
-provider "github" {
-  token = var.github_pat
-  owner = var.github_owner
+# NOTE: there is deliberately no `azuread` provider here yet.
+#
+# It returns in phase 6, aliased to the IDENTITY tenant, when the per-deployment
+# app registrations land. Declaring it now would be dead weight the lock file
+# still pins and tflint still flags — the same reasoning versions.tf used in
+# phase 1, when the identity plane had not yet arrived.
+
+locals {
+  is_platform   = var.layer == "platform"
+  is_deployment = var.layer == "deployment"
+
+  # ── Config: file for size, form for shape ──────────────────────────────────
+  # `merge` is shallow on purpose. A deployment overriding `database:` replaces
+  # the whole block rather than merging into it — so an override states every key
+  # it needs, and you can read one block and know what that deployment gets
+  # without mentally diffing it against defaults.
+  config_file = yamldecode(file("${path.root}/azure/config/deployment-config.yaml"))
+
+  # A deployment absent from `deployments:` is completely valid and inherits
+  # defaults entirely. That is what makes `deployment: demo1` + `apply` a whole
+  # instruction with no file edit — the file is for exceptions, not enrolment.
+  cfg = merge(
+    local.config_file.defaults,
+    try(local.config_file.deployments[var.deployment], {}),
+  )
+
+  # The form may override the file for location; everything else comes from YAML.
+  location = coalesce(var.location, local.cfg.location)
 }
 
-# NOTE: there is deliberately no root-level `data "azurerm_client_config"`.
-# Data sources do not inherit across module boundaries, so each module that needs
-# tenant_id declares its own (see modules/postgresql, modules/keyvault). A root
-# copy was carried through phase 1 and never referenced — tflint flagged it as
-# dead, correctly, so it was removed rather than kept on the promise of a later
-# consumer. If task 4.1 needs it for the AZURE_TENANT_ID distribution, it is one
-# block to add back.
+module "naming" {
+  source = "./modules/naming"
 
-# READ, never own (conflict C1). sentinel-rg is created out of band by the
-# one-time bootstrap (infra.md §10 step 1) and deleted by the Owner-run local
-# teardown procedure (§7.3, R6). Were this a managed resource, `terraform destroy`
-# would remove it and the follow-up `az group delete` would then fail against a
-# group that no longer exists — and the first `apply` would fail too, since the
-# bootstrap has already created it.
-data "azurerm_resource_group" "sentinel" {
-  name = var.resource_group_name
+  deployment         = var.deployment
+  environment        = var.environment
+  location           = local.location
+  subscription_id    = var.subscription_id
+  identity_tenant_id = var.identity_tenant_id
 }
 
-# ── Module wiring ─────────────────────────────────────────────────────────────
+# ── Guards ────────────────────────────────────────────────────────────────────
+# Cheap assertions that fail in seconds, rather than letting a provider explain
+# the mistake eight minutes into an apply.
+resource "terraform_data" "layer_guards" {
+  lifecycle {
+    # The platform is one thing, not one per environment. Building it under a
+    # second environment name would silently create a SECOND cluster — and the
+    # subscription's regional quota is 6 vCPU against a 2 vCPU node, so the
+    # failure would arrive as a quota error naming neither cause.
+    precondition {
+      condition     = !local.is_platform || var.environment == "plat"
+      error_message = "the platform layer must use environment `plat`; got `${var.environment}`. A second platform environment would build a second cluster against a 6-vCPU quota."
+    }
 
-module "acr" {
-  source              = "./modules/acr"
-  resource_group_name = data.azurerm_resource_group.sentinel.name
-  location            = var.location
-  registry_name       = var.registry_name
-}
-
-module "postgresql" {
-  source              = "./modules/postgresql"
-  resource_group_name = data.azurerm_resource_group.sentinel.name
-  location            = var.location
-
-  server_name                         = var.postgres_server_name
-  tenant_id                           = var.tenant_id
-  postgres_entra_admin_object_id      = var.postgres_entra_admin_object_id
-  postgres_entra_admin_principal_name = var.postgres_entra_admin_principal_name
-
-  # Flipped by task 3.1: the backend workload identity becomes the second Entra
-  # administrator. The bool is literal (plan-time known); the principal id may be
-  # unknown on the apply that creates the UAMI — that split is the point.
-  enable_backend_admin      = true
-  backend_uami_principal_id = module.aks.backend_identity_principal_id
-}
-
-module "keyvault" {
-  source              = "./modules/keyvault"
-  resource_group_name = data.azurerm_resource_group.sentinel.name
-  location            = var.location
-
-  vault_name = var.key_vault_name
-  tenant_id  = var.tenant_id
-
-  # The human operator who seeds secrets — explicit, so the assignment does not
-  # follow whoever happened to run apply.
-  kv_admin_object_id = var.kv_admin_object_id
-
-  # The UAMI's principalId, NOT its clientId — a role assignment needs the
-  # service principal's object id.
-  gha_principal_id = azurerm_user_assigned_identity.sentinel_gha.principal_id
-
-  # Flipped by task 3.1: the backend pod reads LLM keys via workload identity.
-  enable_backend_reader     = true
-  backend_uami_principal_id = module.aks.backend_identity_principal_id
-
-  # Flipped by task 3.3: the bridge's KV reference cannot resolve without it.
-  enable_bridge_reader = true
-  bridge_principal_id  = module.functions.bridge_principal_id
-
-  # Flipped by task 3.6: the rotator is the vault's only non-human WRITE
-  # principal, and the SecretNearExpiry wiring rides the same toggle.
-  enable_rotator_officer = true
-  rotator_principal_id   = module.functions.rotator_principal_id
-  rotator_app_id         = module.functions.rotator_app_id
-}
-module "aks" {
-  source              = "./modules/aks"
-  resource_group_name = data.azurerm_resource_group.sentinel.name
-  location            = var.location
-  acr_id              = module.acr.acr_id
-  gha_principal_id    = azurerm_user_assigned_identity.sentinel_gha.principal_id
-}
-module "event_grid" {
-  source              = "./modules/event-grid"
-  resource_group_name = data.azurerm_resource_group.sentinel.name
-  location            = var.location
-  topic_name          = var.event_topic_name
-  function_app_id     = module.functions.function_app_id
-}
-module "functions" {
-  source = "./modules/functions"
-  # NOT sentinel-rg: Y1 (Dynamic/Linux) cannot share a resource group with the
-  # F1 (Dedicated/Linux) plan already there — see oidc.tf.
-  resource_group_name  = data.azurerm_resource_group.functions.name
-  location             = var.location
-  storage_account_name = var.functions_storage_name
-  bridge_name          = var.bridge_name
-  rotator_name         = var.rotator_name
-  key_vault_name       = var.key_vault_name
-}
-module "app_service" {
-  source              = "./modules/app-service"
-  resource_group_name = data.azurerm_resource_group.sentinel.name
-  location            = var.location
-  app_name            = var.dummy_api_name
+    # `plat` is reserved. A deployment using it would collide with the platform
+    # on every name the naming module produces.
+    precondition {
+      condition     = !local.is_deployment || var.environment != "plat"
+      error_message = "`plat` is reserved for the platform layer. Use dev, prod, or another name."
+    }
+  }
 }

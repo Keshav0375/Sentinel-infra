@@ -13,12 +13,18 @@ variable "acr_id" {
   type        = string
 }
 
-variable "gha_principal_id" {
-  description = "Principal ID of the sentinel-gha UAMI (principalId, NOT clientId). Gets Cluster User for az aks get-credentials in CI."
+variable "cluster_name" {
+  description = "Cluster name, from modules/naming. Unique per resource group only, so it carries no uid."
   type        = string
+}
 
-  validation {
-    condition     = can(regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", var.gha_principal_id))
-    error_message = "gha_principal_id must be a GUID — the UAMI's principalId, not its clientId."
-  }
+variable "dns_prefix" {
+  description = "DNS prefix, from modules/naming. Unique per region; Azure appends its own hash."
+  type        = string
+}
+
+variable "node_vm_size" {
+  description = "Node SKU. B2pls_v2 is ARM64 — backend images must build linux/arm64."
+  type        = string
+  default     = "Standard_B2pls_v2"
 }

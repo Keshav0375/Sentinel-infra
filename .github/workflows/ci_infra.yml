@@ -1,48 +1,55 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Deploy — the only automated writer of Sentinel's Azure estate.
-# architecture/infra.md §7.2
+# architecture/infra.md §7.2 (superseded — see decisions.md 2026-08-24)
 #
-# There is deliberately NO destroy counterpart. R6 (2026-08-16): full teardown
-# needs to purge a soft-deleted Key Vault, and deleted vaults live at
-# SUBSCRIPTION scope where this identity holds nothing. From CI the purge 403s
-# silently and the next apply then fails on the reserved name. Granting CI a
-# subscription-scope Key Vault role would let it manage every vault in the
-# subscription — a permanent privilege for a once-a-project operation. Teardown
-# is therefore an Owner-run local procedure (§7.3), and this repo ships three
-# workflows, not four.
+# ── Dispatch only, and that is a consequence not a preference ────────────────
+# Push-to-main auto-apply cannot survive multi-deployment: a push has no way to
+# know WHICH deployment it means. Every apply is now a deliberate button press,
+# and no identity carries a `ref:refs/heads/main` subject any more.
+#
+# ── The environment is the security boundary ─────────────────────────────────
+# Declaring `environment: production` rewrites the OIDC subject to
+# `repo:<owner>/<repo>:environment:production`, replacing the branch form. That
+# is the ONLY subject gha-deploy federates on, and GitHub will not mint it for a
+# `pull_request` event — so the identity that can create and destroy the
+# subscription's contents is unreachable from a PR by construction, not by a
+# rule someone could misconfigure.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: "Sentinel Infra — Deploy"
 
 on:
-  push:
-    branches: [main]
-  # Manual runs. `plan-only` is the safe rehearsal: same credential, same
-  # variables, same state — it just stops before writing. Useful once a branch is
-  # already merged, when the PR plan is no longer there to consult.
   workflow_dispatch:
     inputs:
-      mode:
-        description: 'apply = write · plan-only = show the diff and stop · refresh-only = reconcile state with reality, change nothing'
+      layer:
+        description: 'Which layer to apply.'
         type: choice
         required: true
-        default: apply
-        options:
-          - apply
-          - plan-only
-          - refresh-only
-      target:
-        description: 'Optional single resource address for -target (e.g. module.acr.azurerm_container_registry.sentinel). Blank = whole estate.'
+        default: platform
+        options: [platform, deployment]
+      deployment:
+        description: 'Deployment name (deployment layer only). 2-8 lowercase alphanumeric.'
         type: string
         required: false
-        default: ''
+        default: sentinel
+      environment_name:
+        description: 'Environment within the deployment. The platform layer uses `plat`.'
+        type: string
+        required: false
+        default: plat
+      mode:
+        description: 'apply = write · plan-only = show the diff and stop · refresh-only = reconcile state with reality'
+        type: choice
+        required: true
+        default: plan-only
+        options: [plan-only, apply, refresh-only]
 
 permissions:
   id-token: write
   contents: read
 
 # Never cancel an in-flight apply — a killed apply leaves the state lease held
-# and the real infrastructure half-changed. Queue instead.
+# and the infrastructure half-changed. Queue instead.
 concurrency:
   group: infra-apply
   cancel-in-progress: false
@@ -54,15 +61,6 @@ jobs:
   run-deploy:
     name: Run Deploy
     runs-on: ubuntu-latest
-    # A GitHub environment, so a required-reviewer rule can be switched on later
-    # without touching this file. It is the only human gate between a merge to
-    # main and a change to live Azure.
-    #
-    # It also RENAMES the OIDC subject to
-    # `repo:<owner>/<repo>:environment:production` — not the branch form. That
-    # needs its own federated credential (`sentinel-infra-env-production` in the
-    # school tenant, `sentinel-tf-env-production` in the identity tenant), and
-    # its absence is what failed the very first apply.
     environment: production
     steps:
       - name: Check out
@@ -76,83 +74,89 @@ jobs:
       - name: Log in to Azure
         uses: azure/login@v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # A stopped flexible-server makes terraform ERROR with
-      # `400 ServerStoppedError` on four resources: the provider must refresh the
-      # administrators, database and azure.extensions config, and none of that
-      # reads while the server is down. AKS has no such problem.
+      # Unlike the plan job, this one CAN start the database — gha-deploy holds
+      # Contributor. A stopped flexible-server errors terraform with
+      # `400 ServerStoppedError`, and stopped is its NORMAL idle state, so an
+      # apply that did not check would fail most of the time.
       #
-      # It idles STOPPED to conserve grant hours, so CI cannot assume it is up —
-      # and this has broken a run three times. Starting an already-running server
-      # is an error, not a no-op, hence the state check rather than `|| true`.
+      # Starting an already-running server is an error rather than a no-op, hence
+      # the state check rather than `|| true`.
       - name: Ensure the database is running
-        env:
-          PG_NAME: sentinel-pg-0375
-          PG_RG: sentinel-rg
         run: |
-          state="$(az postgres flexible-server show -n "${PG_NAME}" -g "${PG_RG}" --query state -o tsv)"
-          echo "postgres: ${state}"
+          server="$(az postgres flexible-server list --query "[0].name" -o tsv)"
+          if [ -z "${server}" ]; then
+            echo "no flexible-server yet — first apply will create it"
+            exit 0
+          fi
+          rg="$(az postgres flexible-server list --query "[0].resourceGroup" -o tsv)"
+          state="$(az postgres flexible-server show -n "${server}" -g "${rg}" --query state -o tsv)"
+          echo "postgres ${server}: ${state}"
           if [ "${state}" != "Ready" ]; then
-            az postgres flexible-server start -n "${PG_NAME}" -g "${PG_RG}"
+            az postgres flexible-server start -n "${server}" -g "${rg}"
           fi
 
       - name: Initialize
         env:
-          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           ARM_USE_OIDC: "true"
         run: terraform init -input=false
 
-      - name: Deploy
+      - name: Select workspace
         env:
-          TF_MODE: ${{ inputs.mode || 'apply' }}
-          TF_TARGET: ${{ inputs.target }}
-          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           ARM_USE_OIDC: "true"
+          TF_LAYER: ${{ inputs.layer }}
+          TF_DEPLOYMENT: ${{ inputs.deployment }}
+          TF_ENVIRONMENT: ${{ inputs.environment_name }}
+        # A deployment gets its OWN workspace, and that is the safety property:
+        # its state contains no platform resource, so destroying it cannot reach
+        # the shared cluster.
+        run: |
+          if [ "${TF_LAYER}" = "platform" ]; then
+            ws=platform
+          else
+            ws="${TF_DEPLOYMENT}-${TF_ENVIRONMENT}"
+          fi
+          echo "workspace: ${ws}"
+          terraform workspace select "${ws}" 2>/dev/null || terraform workspace new "${ws}"
+
+      - name: Deploy
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+          TF_MODE: ${{ inputs.mode }}
+          TF_LAYER: ${{ inputs.layer }}
+          TF_DEPLOYMENT: ${{ inputs.deployment }}
+          TF_ENVIRONMENT: ${{ inputs.environment_name }}
           TF_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           TF_LOCATION: ${{ vars.AZURE_LOCATION }}
           TF_PG_ADMIN_OBJECT_ID: ${{ vars.PG_ADMIN_OBJECT_ID }}
           TF_PG_ADMIN_PRINCIPAL_NAME: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
-          TF_KV_ADMIN_OBJECT_ID: ${{ vars.KV_ADMIN_OBJECT_ID }}
-          TF_IDENTITY_CLIENT_ID: ${{ vars.AZURE_IDENTITY_CLIENT_ID }}
-          TF_GITHUB_PAT: ${{ secrets.GH_PAT }}
-        # A push always applies. Only a manual dispatch can choose otherwise —
-        # `inputs.mode` is empty on a push, so the default below is what runs.
-        #
-        # -target is a documented escape hatch, not a habit: it applies a
-        # subgraph and leaves the rest un-reconciled, so the next full run has to
-        # catch up. Reachable manually, never on a push.
+        # `plan-only` is the default deliberately: the destructive option should
+        # be the one you choose, not the one you get by pressing Enter.
         run: |
           args=(-no-color -input=false)
-          if [ -n "${TF_TARGET}" ]; then
-            args+=("-target=${TF_TARGET}")
-          fi
           case "${TF_MODE}" in
-            plan-only)
-              verb=plan
-              ;;
-            refresh-only)
-              verb=apply
-              args+=(-auto-approve -refresh-only)
-              ;;
-            *)
-              verb=apply
-              args+=(-auto-approve)
-              ;;
+            plan-only)    verb=plan ;;
+            refresh-only) verb=apply; args+=(-auto-approve -refresh-only) ;;
+            *)            verb=apply; args+=(-auto-approve) ;;
           esac
           echo "running: terraform ${verb} ${args[*]}"
           terraform "${verb}" "${args[@]}" \
+            -var="layer=${TF_LAYER}" \
+            -var="deployment=${TF_DEPLOYMENT}" \
+            -var="environment=${TF_ENVIRONMENT}" \
             -var="subscription_id=${TF_SUBSCRIPTION_ID}" \
             -var="location=${TF_LOCATION}" \
-            -var="postgres_entra_admin_object_id=${TF_PG_ADMIN_OBJECT_ID}" \
-            -var="postgres_entra_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}" \
-            -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}" \
-            -var="identity_client_id=${TF_IDENTITY_CLIENT_ID}" \
-            -var="identity_use_oidc=true" \
-            -var="github_pat=${TF_GITHUB_PAT}"
+            -var="pg_admin_object_id=${TF_PG_ADMIN_OBJECT_ID}" \
+            -var="pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}"

@@ -239,3 +239,4 @@ crash.*.log
 
 # Terraform-built function deploy artifacts (archive_file output)
 modules/functions/dist/
+.ops-role.json

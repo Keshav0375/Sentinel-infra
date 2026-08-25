@@ -66,13 +66,19 @@ env:
   # Duplicates var.registry_name's default. A workflow cannot read a Terraform
   # variable, so this is unavoidable — the same duplication as the storage
   # account name in backend.tf and oidc.tf. Change them together.
-  ACR_NAME: sentinelacr0375
+  ACR_NAME: acrsentinelplat2fef
   IMAGE_REPO: ci-runner
 
 jobs:
   build-and-push:
     name: Build and Push Runner Image
     runs-on: ubuntu-latest
+
+    # Pushing an image is a WRITE, so this uses gha-deploy — and gha-deploy
+    # federates only on environment subjects. Without this the job presents a
+    # branch subject that no identity trusts.
+    environment: production
+
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -80,7 +86,7 @@ jobs:
       - name: Log in to Azure
         uses: azure/login@v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 

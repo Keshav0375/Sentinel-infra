@@ -1,35 +1,10 @@
-# Copy to terraform.tfvars (gitignored) and fill in.
+# Local run values. CI passes these as -var flags instead (C5: never TF_VAR_*).
 #
-# In CI none of this file is used: ci_infra*.yml pass every value as -var, sourced
-# from GitHub repo *variables* plus the single GH_PAT *secret* (infra.md §9).
+# `layer` has no default deliberately — it decides whether a run manages the
+# shared platform or one deployment, and defaulting that is how someone applies
+# the wrong one.
+layer           = "platform"
+subscription_id = "<your-subscription-id>"
 
-subscription_id = "174e25ca-ab82-4671-a913-9c2f66e5924d"
-
-# R3, resolved 2026-08-15. Quota verified in this region: Basv2 family limit 10,
-# Total Regional vCPUs limit 6 — enough for the single-node scale-to-zero AKS.
-location = "canadacentral"
-
-resource_group_name = "sentinel-rg"
-
-# az ad signed-in-user show --query "{id:id, upn:userPrincipalName}"
-postgres_entra_admin_object_id      = "00000000-0000-0000-0000-000000000000"
-postgres_entra_admin_principal_name = "you@uwindsor.ca"
-
-# The human who seeds Key Vault secrets (§10 step 7). Same principal as the
-# Postgres admin in practice, declared separately because they are different
-# concerns. REQUIRED — has no default, so CI must pass it too (§9).
-kv_admin_object_id = "00000000-0000-0000-0000-000000000000"
-
-# Pinned so an `az login` to the identity tenant in another terminal cannot
-# silently repoint the Entra admin and Key Vault to the wrong directory.
-tenant_id = "12f933b3-3d61-4b19-9a4d-689021de8cc9"
-
-github_owner = "Keshav0375"
-
-# GitHub PAT, `repo` scope. Never commit the real value — terraform.tfvars is
-# gitignored precisely so this line stays a placeholder in git.
-github_pat = "ghp_replace_me"
-
-# The personal IDENTITY tenant (R4) — holds only the two backend-API app
-# registrations. Consumed by the aliased azuread provider from task 3.5 on.
-identity_tenant_id = "eae0d3c6-af22-4b70-ad3b-12d625a06139"
+pg_admin_object_id      = "<az ad signed-in-user show --query id -o tsv>"
+pg_admin_principal_name = "<your-upn>"

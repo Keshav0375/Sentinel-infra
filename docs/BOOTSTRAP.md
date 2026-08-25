@@ -1,417 +1,296 @@
-# Bootstrap — one-time manual setup
+# Bootstrap — from an empty subscription to a running deployment
 
-Everything in this repo is Terraform **except** the two things Terraform cannot create for
-itself. This document covers those, in order, and nothing else.
+Everything Terraform cannot do for itself, in the order it has to happen.
 
-> **Run hand-typed `az` and `terraform` commands in PowerShell.** MSYS2 rewrites anything
-> shaped like a Unix path into a Windows path, so `--scope /subscriptions/...` silently
-> becomes `C:/Program Files/Git/subscriptions/...` and fails confusingly. This affects
-> `terraform import` too, not just `az`.
->
-> **The `.sh` scripts set `MSYS_NO_PATHCONV=1` themselves**, so they are safe either way —
-> but invoking them *from* PowerShell needs the full path to Git Bash, because bare `bash`
-> in PowerShell resolves to `C:\Windows\system32\bash.exe`, the **WSL** launcher, and
-> fails with `execvpe(/bin/bash) failed: No such file or directory` if no distro is
-> installed:
->
-> ```powershell
-> $bash = "C:\Program Files\Git\bin\bash.exe"
-> & $bash scripts/bootstrap-state.sh
-> ```
->
-> Note PowerShell 5.1 has no `&&` operator — chain with `;` or use separate lines.
+> **Two layers, two workspaces.** The **platform** — one registry, one cluster, one database
+> server — is built once. Each **deployment** is built against it, in its own workspace, and can
+> be destroyed without touching it. They are separate *state files*, and that is a safety
+> property rather than a preference: in one state, destroying a deployment would take the
+> cluster with it.
+
+---
 
 ## Why any of this is manual
 
-Two circular dependencies, and one deliberate seam to break each:
+Three things are structurally impossible for Terraform to create:
 
-1. **State.** Terraform keeps state in an Azure Storage container. It cannot create that
-   container, because to run at all it needs somewhere to put state.
-2. **Identity.** GitHub Actions authenticates to Azure via OIDC to run Terraform. The
-   identity and federated credential that make OIDC work cannot be created by that pipeline,
-   because it has no identity yet.
+| | |
+|---|---|
+| **The state storage** | It needs somewhere to put state before it can run at all. |
+| **The identities its pipeline authenticates as** | It cannot create the credential it is already using. |
+| **The identity-tenant app credentials** | Cross-tenant, and reached only by an interactive login. |
 
-Both are resolved the same way: create the minimum by hand, then **import** it so Terraform
-manages it from then on. The manual surface is kept as small as possible and is scripted, so
-it is reproducible rather than folklore.
+The first two live in **`rg-sentinel-bootstrap`** — one group holding exactly what Terraform can
+never own, destroyed by nothing. Naming it `-tfstate` would be a lie about half its contents.
+
+Everything else is codified.
 
 ---
 
-## Prerequisites
+## ⚠️ The `az` context hazard — read this before anything else
 
-| Tool | Verify |
-|------|--------|
-| Azure CLI | `az --version` |
-| Terraform ≥ 1.9 | `terraform version` |
+`az` keeps **one** context in `~/.azure`, shared by every terminal. Sentinel spans two tenants,
+so **any** `az login --tenant <identity>` silently repoints every other session. This happened
+four times during the build, and once produced a "token minted successfully" check that was a
+false positive.
 
-```powershell
-az login --tenant 12f933b3-3d61-4b19-9a4d-689021de8cc9
-az account set --subscription 174e25ca-ab82-4671-a913-9c2f66e5924d
-```
-
-## Step 1 — Resource group + resource providers
+Both bootstrap scripts assert the subscription and refuse to run in the wrong one. Plain
+`terraform apply` does not.
 
 ```powershell
-az group create --name sentinel-rg --location canadacentral
-```
-
-A fresh subscription has almost every resource provider **unregistered**, and the first
-`terraform apply` then fails with `subscription is not registered to use namespace ...` —
-which reads like a Terraform bug and is not. Register them once:
-
-```powershell
-foreach ($ns in @('Microsoft.Compute','Microsoft.ContainerService','Microsoft.ContainerRegistry',
-                  'Microsoft.DBforPostgreSQL','Microsoft.KeyVault','Microsoft.EventGrid',
-                  'Microsoft.Web','Microsoft.Storage','Microsoft.ManagedIdentity',
-                  'Microsoft.OperationalInsights')) {
-  az provider register --namespace $ns
-}
-az provider show --namespace Microsoft.Compute --query registrationState -o tsv   # → Registered
-```
-
-Registration is idempotent and takes a minute or two to settle.
-
-## Step 2 — Terraform state storage
-
-```powershell
-& "C:\Program Files\Git\bin\bash.exe" scripts/bootstrap-state.sh
-```
-
-Idempotent — re-running it is a no-op, so it doubles as a "is my state storage healthy?"
-check. It creates:
-
-| Thing | Value | Why |
-|-------|-------|-----|
-| Resource group | `sentinel-state-rg` | **Not** `sentinel-rg` — see below |
-| Storage account | `sentineltfstate0375` | `Standard_LRS`, blob encryption, TLS 1.2 min |
-| Container | `tfstate` | created with `--auth-mode login`, i.e. via Entra |
-| Role assignment | `Storage Blob Data Contributor` → you | see below |
-
-> **The env vars are for recovery, not renaming.** `STATE_SA=othername` changes what the
-> *script* creates, but `backend.tf` and `oidc.tf` cannot read env vars and still point at
-> the old name — you would get state storage Terraform cannot reach. A real rename means
-> changing all six places the script lists. Same applies to `RG`/`UAMI`/`LOCATION`/`OWNER`
-> in `bootstrap-oidc.sh`.
-
-### Why state lives in its own resource group
-
-`ci_destroy_infra` runs `terraform destroy` followed by `az group delete` on `sentinel-rg`.
-If state lived there, the teardown would delete the state describing what it is tearing
-down, and the next run would have no idea what exists. Blast-radius isolation at the trust
-root.
-
-### Control plane ≠ data plane — the one that will confuse you
-
-`backend.tf` sets `use_azuread_auth = true`, so Terraform reaches the state blob with an
-**Entra token** rather than a storage access key. **Being Owner on the subscription grants
-no blob access at all.** Owner is a *control-plane* role: it lets you create, configure and
-delete the storage account, and gives you nothing inside it.
-
-Without an explicit data-plane grant, `terraform init` fails with a 403 that looks like a
-broken backend config. Two principals need it:
-
-- **you**, for local runs — the bootstrap script assigns this
-- **the `sentinel-gha` UAMI**, for CI — declared in `oidc.tf` as `gha_state_blob`
-
-RBAC is eventually consistent; propagation takes 30–120s. The script retries rather than
-failing on the first attempt.
-
-### If the storage account name is taken
-
-Storage account names are globally unique across **all** of Azure, not just your tenant.
-The original `sentineltfstate` was already claimed by someone else — hence `0375`. If the
-current name ever collides, change it in **all** of these together, in one commit:
-
-- `backend.tf` — `storage_account_name`
-- `scripts/bootstrap-state.sh` — `STATE_SA` default
-- `oidc.tf` — the `gha_state_blob` role scope
-- this file
-- `sentinel-brain` → `architecture/infra.md` §8.1
-
-The script distinguishes "taken by another tenant" from "already yours" and tells you which.
-
-### State locking
-
-Azure Storage provides it natively via **blob leases** — no DynamoDB-equivalent resource, no
-extra table. Terraform takes a lease on the state blob for the duration of an operation.
-A crashed run can leave a stale lease; `terraform force-unlock <id>` clears it.
-
-## Step 3 — Verify state
-
-```powershell
-terraform init
-```
-
-Expect `Successfully configured the backend "azurerm"!`. That single line proves the storage
-account, the container, the Entra auth path and your data-plane role assignment all work
-together — it is the real acceptance test for step 2.
-
-## Step 4 — OIDC identity
-
-```powershell
-& "C:\Program Files\Git\bin\bash.exe" scripts/bootstrap-oidc.sh
-```
-
-Idempotent. Creates the `sentinel-gha` user-assigned managed identity, its two role
-assignments, and the first two federated credentials, then prints the five
-`terraform import` commands. Run those, then `terraform apply` creates the remaining three
-credentials.
-
-> The CI identity is a **managed identity**, not an app registration. The subscription lives
-> in the `uwindsor.ca` tenant, where `allowedToCreateApps` is `false` at tenant policy — no
-> app registration can be created. A UAMI is an ordinary Azure resource governed by RBAC and
-> carries federated credentials identically; `azure/login@v2` cannot tell them apart.
-
-### Two traps in the import step
-
-Both of these were hit for real, and both produce errors that point away from the cause.
-
-**Run the imports in PowerShell, or `export MSYS_NO_PATHCONV=1` first.** MSYS rewrites
-`/subscriptions/...` into `C:/Program Files/Git/subscriptions/...` for **any** command —
-`terraform` included, not just `az`. The failure reads as a malformed resource ID.
-
-**Resource-ID casing is significant.** `az identity show --query id` returns the id with
-`resourcegroups` (lowercase g); the azurerm provider's parser is case-sensitive and rejects
-it with *"the segment at position 0 didn't match"*. Use **`resourceGroups`**. The script
-builds the id by hand for exactly this reason — don't substitute what `az` printed.
-
-**Expected result:** `terraform plan` after the imports shows **no destroy, no replace** —
-only the 3 remaining federated credentials to add.
-
-### Why `skip_service_principal_aad_check` is absent
-
-That flag guards the `PrincipalNotFound` race when Terraform creates a role assignment
-against a service principal that hasn't finished replicating. These two assignments are
-always created by the bootstrap script and only *imported*, so the race cannot occur — and
-the flag is create-only, so setting it on an imported assignment plans as an in-place update
-that fails with `doesn't support update`. Phase 2/3 assignments do create against fresh
-identities and should set it.
-
-## Step 4b — Identity-tenant federated credentials (R4)
-
-**The two-tenant split doubles the federated-credential surface, and this is the half that is
-easy to forget.** CI authenticates to *two* tenants on every run: the school tenant as the
-`sentinel-gha` UAMI (azurerm), and the identity tenant as the `sentinel-tf-identity` app
-registration (the aliased `azuread` provider). A federated credential is scoped to one identity
-in one tenant — so **every workflow context needs a credential in both places**.
-
-B11 created only `sentinel-tf-main` (`ref:refs/heads/main`). Proven live 2026-08-24: a
-pull-request run gets all the way through the azurerm plan, prints every output, and *then*
-dies with `AADSTS700213` building the azuread client. The message names the subject, not the
-tenant, so it reads like the school-tenant credential is broken when that one worked perfectly.
-
-The identity tenant needs all three subjects the school tenant has:
-
-| Credential | Subject | Used by |
-|---|---|---|
-| `sentinel-tf-main` | `repo:Keshav0375/Sentinel-infra:ref:refs/heads/main` | ✅ exists (B11) |
-| `sentinel-tf-pr` | `repo:Keshav0375/Sentinel-infra:pull_request` | `ci_infra_dry.yml` `run-plan` |
-| `sentinel-tf-env-production` | `repo:Keshav0375/Sentinel-infra:environment:production` | `ci_infra.yml` apply |
-
-These are **bootstrap objects**, not Terraform resources — Terraform authenticates *as* this
-app, so it cannot manage its own credentials. Same paradox as the UAMI in step 4.
-
-```powershell
-# ⚠️ This repoints the SHARED az context (see the Day 2 hazard). Switch back after.
-az login --tenant eae0d3c6-af22-4b70-ad3b-12d625a06139 --allow-no-subscriptions
-
-$app = "378ccade-dd35-4f92-a71f-4a781fe5ace3"   # sentinel-tf-identity, app objectId
-
-'{"name":"sentinel-tf-pr","issuer":"https://token.actions.githubusercontent.com","subject":"repo:Keshav0375/Sentinel-infra:pull_request","audiences":["api://AzureADTokenExchange"]}' | Out-File -Encoding utf8 fic-pr.json
-az ad app federated-credential create --id $app --parameters "@fic-pr.json"
-
-'{"name":"sentinel-tf-env-production","issuer":"https://token.actions.githubusercontent.com","subject":"repo:Keshav0375/Sentinel-infra:environment:production","audiences":["api://AzureADTokenExchange"]}' | Out-File -Encoding utf8 fic-env.json
-az ad app federated-credential create --id $app --parameters "@fic-env.json"
-
-az ad app federated-credential list --id $app --query "[].{name:name,subject:subject}" -o tsv
-Remove-Item fic-pr.json, fic-env.json
-
-# Back to the school tenant, or the next terraform apply runs in the wrong context.
-az login --tenant 12f933b3-3d61-4b19-9a4d-689021de8cc9
+az account show --query "{sub:name, tenant:tenantId}" -o tsv
+# expect: Azure for Students   12f933b3-3d61-4b19-9a4d-689021de8cc9
 az account set --subscription 174e25ca-ab82-4671-a913-9c2f66e5924d
 ```
 
 ---
 
-## Step 5 — GitHub configuration
+## Step 1 — State storage
 
-Set on the `Keshav0375/Sentinel-infra` repo. Note the split — these are **variables**, not
-secrets, because under OIDC they are identifiers rather than credentials:
+```bash
+./scripts/bootstrap-state.sh
+```
+
+Creates `rg-sentinel-bootstrap`, the storage account `stsentineltf<uid6>`, the `tfstate`
+container, and grants **you** Storage Blob Data Contributor on it. Registers eleven resource
+providers. Idempotent — safe to re-run as a health check.
+
+> **Control plane is not data plane.** Being Owner of the subscription does **not** let you read
+> a blob. Without that role assignment `terraform init` returns a 403 that reads like broken
+> backend configuration. This is the single most confusing failure in the whole bootstrap.
+
+The storage account name derives from the **subscription**, not from a deployment — it exists
+before any deployment does. It must match `backend.tf`, which cannot interpolate variables.
+
+## Step 2 — The three CI identities
+
+```bash
+./scripts/bootstrap-identities.sh
+```
+
+| Identity | Rights | Federated subjects | Reachable from a PR? |
+|---|---|---|---|
+| `gha-plan` | Reader + blob **Reader** | `pull_request`, `environment:plan` | yes — and it can change nothing |
+| `gha-deploy` | Contributor + RBAC Admin + AKS Cluster Admin | `environment:production`, `environment:destroy` | **no** |
+| `gha-ops` | custom 10-action start/stop role | `environment:ops` | **no** |
+
+**The protection is the token, not a rule.** A job declaring `environment: X` receives the OIDC
+subject `repo:<owner>/<repo>:environment:X` instead of the branch form, and GitHub will not mint
+that for a `pull_request` event. `gha-deploy` is therefore unreachable from a PR *by
+construction* — there is nothing to misconfigure.
+
+`gha-plan` holds blob **Reader**, so plans run `-lock=false`. Its entire permission set is
+`*/read` plus two blob reads: no write action anywhere in the subscription. The cost is that an
+unlocked plan racing an apply can produce a stale plan — acceptable, since plans are advisory
+and applies are dispatch-only.
+
+The script prints three client IDs. Set them as repository **variables**, not secrets — under
+OIDC these are public identifiers, and masking them turns `AADSTS700213: subject ***` into an
+unreadable failure.
+
+## Step 3 — GitHub repository configuration
 
 | Kind | Name | Value |
-|------|------|-------|
-| variable | `AZURE_CLIENT_ID` | the UAMI's `clientId` (not its principal ID) |
+|---|---|---|
+| variable | `AZURE_CLIENT_ID_PLAN` | from step 2 |
+| variable | `AZURE_CLIENT_ID_DEPLOY` | from step 2 |
+| variable | `AZURE_CLIENT_ID_OPS` | from step 2 |
 | variable | `AZURE_TENANT_ID` | `12f933b3-3d61-4b19-9a4d-689021de8cc9` |
 | variable | `AZURE_SUBSCRIPTION_ID` | `174e25ca-ab82-4671-a913-9c2f66e5924d` |
 | variable | `AZURE_LOCATION` | `canadacentral` |
 | variable | `PG_ADMIN_OBJECT_ID` | `az ad signed-in-user show --query id -o tsv` |
 | variable | `PG_ADMIN_PRINCIPAL_NAME` | your UPN |
-| variable | `KV_ADMIN_OBJECT_ID` | `az ad signed-in-user show --query id -o tsv` — same value as `PG_ADMIN_OBJECT_ID`, but a separate variable on purpose: the Key Vault admin and the database admin are the same person today and need not stay that way |
-| variable | `AZURE_IDENTITY_CLIENT_ID` | `8f7ff635-799b-4bdd-b1fa-2ff9bbe75560` — `sentinel-tf-identity`, the app CI authenticates as in the **identity** tenant (R4) |
-| **secret** | `GH_PAT` | GitHub PAT, `repo` scope |
+| variable | `KV_ADMIN_OBJECT_ID` | same as `PG_ADMIN_OBJECT_ID` today, separate on purpose |
+| variable | `AZURE_IDENTITY_TENANT_ID` | `eae0d3c6-af22-4b70-ad3b-12d625a06139` |
 
-⚠️ **An unset variable is not an error.** GitHub renders a missing `vars.X` as the empty
-string, so the workflow runs `-var="kv_admin_object_id="` and Terraform fails somewhere
-downstream with a message about a Key Vault role assignment. Set all eight before the first
-CI run, and if a plan fails oddly, check this table first.
+Also create four GitHub **environments**: `plan`, `production`, `destroy`, `ops`. Put a required
+reviewer on `destroy`; the others need none.
 
-There is no `AZURE_IDENTITY_TENANT_ID` variable here: no workflow passes it, because
-`variables.tf` pins the identity tenant as a default. It *is* pushed to the `Sentinel` repo
-by task 4.1, where the backend workflows do need it.
+> ⚠️ **An unset variable is not an error.** GitHub renders a missing `vars.X` as the empty
+> string, so the workflow runs `-var="kv_admin_object_id="` and Terraform fails somewhere
+> downstream about a role assignment. If a run fails oddly, check this table first.
 
-> The secret is `GH_PAT`, **not** `GITHUB_PAT`. GitHub reserves the `GITHUB_` prefix and
-> rejects any secret or variable using it — the original name was uncreatable.
+There is no `AZURE_CLIENT_SECRET` (OIDC removes it), no `DB_PASSWORD` (Postgres is Entra-only),
+and no `GITHUB_`-prefixed name (GitHub reserves that prefix outright).
 
-There is no `AZURE_CLIENT_SECRET` (OIDC removes it), no `DB_PASSWORD` (PostgreSQL is
-Entra-only), and no `sentinel-api-token`.
+## Step 4 — Identity-tenant federated credentials (R4)
+
+**The two-tenant split doubles the federated-credential surface, and this is the half that gets
+forgotten.** CI authenticates to *two* tenants on every run: the school tenant as a UAMI, and
+the identity tenant as `sentinel-tf-identity`. A credential is scoped to one identity in one
+tenant, so every workflow context needs one in **both**.
+
+Proven live in phase 4: a pull-request run got through the *entire* azurerm plan, printed every
+output, and then died `AADSTS700213` building the azuread client — with a message naming the
+subject but not the tenant, so it read as though the school credential were broken.
+
+```powershell
+# ⚠️ repoints the SHARED az context. Switch back afterwards.
+az login --tenant eae0d3c6-af22-4b70-ad3b-12d625a06139 --allow-no-subscriptions
+
+$app = "378ccade-dd35-4f92-a71f-4a781fe5ace3"   # sentinel-tf-identity
+
+foreach ($e in @("plan","production","destroy")) {
+  "{`"name`":`"sentinel-tf-env-$e`",`"issuer`":`"https://token.actions.githubusercontent.com`",`"subject`":`"repo:Keshav0375/Sentinel-infra:environment:$e`",`"audiences`":[`"api://AzureADTokenExchange`"]}" |
+    Out-File -Encoding utf8 fic.json
+  az ad app federated-credential create --id $app --parameters "@fic.json"
+}
+Remove-Item fic.json
+
+az ad app federated-credential list --id $app --query "[].{n:name,s:subject}" -o table
+```
+
+`environment:ops` is **not** needed — pause/resume never runs Terraform, so it never touches the
+`azuread` provider.
+
+While you are in that tenant, confirm the service principal actually holds its role. Phase 4
+recorded this as granted when it was not:
+
+```powershell
+az rest --method GET --url "https://graph.microsoft.com/v1.0/servicePrincipals/a999bb84-7f5f-40ec-84ed-817337c9c1ba/transitiveMemberOf" --query "value[].displayName" -o tsv
+# expect: Application Administrator
+```
+
+Then switch back:
+
+```powershell
+az login --tenant 12f933b3-3d61-4b19-9a4d-689021de8cc9
+az account set --subscription 174e25ca-ab82-4671-a913-9c2f66e5924d
+```
+
+## Step 5 — The platform layer
+
+One registry, one cluster, one database server. Built once.
+
+```bash
+terraform init
+terraform workspace new platform     # or: terraform workspace select platform
+terraform apply                      # terraform.tfvars sets layer = "platform"
+```
+
+**Why one cluster.** The subscription's regional quota is **6 vCPU** and an AKS node is 2 —
+cluster-per-deployment stops at three with no headroom. Each deployment gets a namespace
+instead, and the isolation is not weaker for being logical: workload identity federates on
+`system:serviceaccount:<namespace>:<sa>`, matched by Entra as an exact string with no wildcard,
+so a pod in one namespace cannot mint a token for another's Key Vault.
+
+**The cluster is ARM64** (`Standard_B2pls_v2`), which propagates: backend images must build
+`linux/arm64`. Not a preference — the grant SKU `B2ats_v2` fails the system pool's 4 GB floor,
+`B2s` is not in this subscription's allowed list for canadacentral, and every permitted small
+SKU there is ARM.
+
+## Step 6 — Runner image
+
+```bash
+./ci-images/build-push.sh
+az acr repository show-tags --name <acr> --repository ci-runner -o tsv
+```
+
+One manual push breaks the circularity — the workflow that builds this image needs an ACR the
+platform apply creates, and runs inside the image it builds. Afterwards `ci_runners.yml` owns
+every rebuild, which is what keeps the image corresponding to a commit rather than to someone's
+laptop.
+
+## Step 7 — A deployment
+
+*(Phase 6 — the workflows that make this one button press.)*
+
+```bash
+terraform workspace new demo1-dev
+terraform apply -var layer=deployment -var deployment=demo1 -var environment=dev
+```
+
+A deployment absent from `azure/config/deployment-config.yaml` inherits `defaults:` entirely, so
+this needs no file edit. Add a block there only when a deployment must differ.
+
+## Step 8 — Key Vault secrets
+
+**Terraform never writes a runtime secret.** The vault is created empty on purpose: a secret in
+state is a secret in a storage account, readable by anything with state access and visible in
+every plan. Set by hand, once, rotated at the provider.
+
+```bash
+az keyvault secret set --vault-name <kv> --name anthropic-api-key   --value <...> --expires <+90d>
+az keyvault secret set --vault-name <kv> --name openai-api-key      --value <...> --expires <+90d>
+az keyvault secret set --vault-name <kv> --name datadog-api-key     --value <...> --expires <+90d>
+az keyvault secret set --vault-name <kv> --name datadog-app-key     --value <...> --expires <+90d>
+az keyvault secret set --vault-name <kv> --name langfuse-public-key --value <...> --expires <+90d>
+az keyvault secret set --vault-name <kv> --name langfuse-secret-key --value <...> --expires <+90d>
+az keyvault secret set --vault-name <kv> --name teams-webhook-url   --value <...> --expires <+90d>
+```
+
+Set `--expires` on every one. The rotation Function watches `SecretNearExpiry`; a secret with no
+expiry never fires it, so the rotation path silently does nothing.
 
 ---
 
 ## Day 2 — stopping and starting
 
-Two resources idle **stopped** to conserve the free grants, and they behave *differently*
-under Terraform. Getting this wrong costs a confusing failed plan, so it is written down
-once here rather than rediscovered.
+Two resources idle **stopped**, and they behave *differently* under Terraform.
 
-| Resource | Idle state | `terraform plan` while stopped | Auto-restart |
+| Resource | Idle | `terraform plan` while stopped | Auto-restart |
 |---|---|---|---|
-| `sentinel-pg-0375` (Postgres) | Stopped | ❌ **Errors** — `400 ServerStoppedError` on 4 resources | Azure restarts it after **7 days** |
-| `sentinel-aks` (AKS) | Stopped | ✅ Works fine | No |
+| Postgres | Stopped | ❌ **errors** — `400 ServerStoppedError` | Azure restarts it after **7 days** |
+| AKS | Stopped | ✅ works | no |
+
+**Why they differ:** the provider must *refresh* Postgres' administrators, database and
+`azure.extensions` configuration, and the control plane refuses those reads while the server is
+down. AKS exposes its whole configuration regardless of power state.
 
 ```powershell
-# Before ANY terraform command:
-az postgres flexible-server start -n sentinel-pg-0375 -g sentinel-rg
-
-# After you are done (it consumes grant hours while Ready):
-az postgres flexible-server stop  -n sentinel-pg-0375 -g sentinel-rg
-
-# AKS is the backend's scale-to-zero mechanism, not a manual chore — the incident
-# workflows drive it (backend §8.5). A system pool cannot scale below 1 node, so
-# it is the whole CLUSTER that stops, not the node pool.
-az aks start -g sentinel-rg -n sentinel-aks
-az aks stop  -g sentinel-rg -n sentinel-aks
+az postgres flexible-server start -n <psql> -g <rg>   # before ANY terraform command
+az postgres flexible-server stop  -n <psql> -g <rg>
+az aks start -g <rg> -n <aks>
+az aks stop  -g <rg> -n <aks>
 ```
 
-**Why Postgres errors and AKS does not:** the azurerm provider must *refresh* the Postgres
-administrators, database and `azure.extensions` configuration, and the control plane refuses
-those reads while the server is stopped. AKS exposes its whole configuration regardless of
-power state.
+Both CI terraform jobs check and start the database themselves — this broke a run three times
+before it was fixed in the one place that removes it permanently.
 
-## Day 2 — the two-tenant `az` context hazard
+**Pause is not zero cost.** Stopping ends the *compute* charge, which dominates. OS disks,
+storage, the AKS load balancer and the ACR daily charge continue. Only destroy is zero.
 
-`az` keeps **one** context in `~/.azure`, shared by every terminal. Sentinel spans two
-tenants (school = resources, personal = the two app registrations), so **any** `az login
---tenant <identity>` silently repoints every other session — this has happened four times
-during the build. Both bootstrap scripts assert `EXPECTED_SUB` and refuse to run in the
-wrong context; plain `terraform apply` does not.
+## Day 2 — Windows-specific traps
 
-```powershell
-# Always confirm before applying:
-az account show --query "{sub:name, tenant:tenantId}" -o tsv
-# Expect: Azure for Students   12f933b3-3d61-4b19-9a4d-689021de8cc9
-az account set --subscription 174e25ca-ab82-4671-a913-9c2f66e5924d
-```
+Both cost real time; both are now handled inside the scripts.
 
-`identity.tf` still resolves correctly from this school context, because the school account
-is a redeemed **guest** with Application Administrator in the identity tenant — the aliased
-`azuread` provider mints a token for the same signed-in user.
+**Git Bash rewrites Unix-looking paths.** An Azure resource ID starts with `/subscriptions/`, so
+`--scope /subscriptions/...` arrives as `C:/Program Files/Git/subscriptions/...` and the API
+answers `MissingSubscription` — a message that says nothing about path conversion. Set
+`MSYS_NO_PATHCONV=1`.
+
+**`az` emits CRLF.** Command substitution strips the trailing newline but *not* the carriage
+return, so every captured value silently carries one — which breaks string comparisons and
+resource IDs.
 
 ---
 
-## Step 6 — First apply
+## Teardown
 
-```powershell
-az postgres flexible-server start -n sentinel-pg-0375 -g sentinel-rg   # see Day 2
-terraform init
-terraform plan      # read it. every resource should be a create or a no-op
-terraform apply
-```
-
-## Step 7 — Push the CI runner image (once)
-
-`ci_runners.yml` rebuilds this image on every change to `ci-images/**` — but it authenticates
-to an ACR that only exists after step 6, and it runs on a runner that wants the image. One
-manual push breaks the circularity; after that, never run this by hand.
+**A deployment** tears down through its own workflow, or:
 
 ```bash
-./ci-images/build-push.sh
-az acr repository show-tags --name sentinelacr0375 --repository ci-runner -o tsv   # expect: latest
+terraform workspace select demo1-dev
+terraform destroy -var layer=deployment -var deployment=demo1 -var environment=dev
+terraform workspace select platform && terraform workspace delete demo1-dev
 ```
 
-## Step 8 — Seed the Key Vault secrets (B4–B8)
+The Key Vault needs no manual purge: the azurerm provider purges on destroy by default, so the
+name is immediately reusable. That is what makes destroy → recreate of the same deployment name
+work at all.
 
-**Terraform never writes a runtime secret.** The vault is created empty on purpose: a secret
-in state is a secret in a storage account, readable by anything with state access, and
-diffable in every plan. These are set by hand, once, and rotated at the provider.
+**The platform**, only when nothing depends on it:
 
 ```bash
-az keyvault secret set --vault-name sentinel-kv-0375 --name anthropic-api-key  --value <...>
-az keyvault secret set --vault-name sentinel-kv-0375 --name openai-api-key     --value <...>
-az keyvault secret set --vault-name sentinel-kv-0375 --name datadog-api-key    --value <...>
-az keyvault secret set --vault-name sentinel-kv-0375 --name datadog-app-key    --value <...>
-az keyvault secret set --vault-name sentinel-kv-0375 --name langfuse-public-key --value <...>
-az keyvault secret set --vault-name sentinel-kv-0375 --name langfuse-secret-key --value <...>
-az keyvault secret set --vault-name sentinel-kv-0375 --name teams-webhook-url  --value <...>
+terraform workspace select platform
+terraform destroy -var layer=platform
 ```
 
-Set `--expires` on each. The rotation Function watches `SecretNearExpiry`; a secret with no
-expiry never fires it, so the rotation path silently does nothing.
-
-## Step 9 — Turn on cross-repo distribution (B9)
-
-`github-repo-config.tf` ships **disabled**, because the github provider authenticates at
-configure time and a missing PAT fails the whole plan with a 401 rather than skipping one
-resource.
-
-1. Create a GitHub PAT with `repo` scope and set it as the `GH_PAT` secret (step 5).
-2. Change `enable_repo_config`'s default to `true` in `variables.tf` and commit — one line,
-   reviewable, and it leaves a date in the history for when distribution turned on.
-3. Apply. Then confirm:
+**The bootstrap group is last, and by hand** — it holds the state describing everything above:
 
 ```bash
-gh secret   list -R Keshav0375/Sentinel              # 3:  ACR_LOGIN_SERVER, ACR_USERNAME, ACR_PASSWORD
-gh variable list -R Keshav0375/Sentinel              # 6:  AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
-                                                     #     AZURE_IDENTITY_TENANT_ID, AZURE_GHA_CLIENT_ID, SENTINEL_API_AUDIENCE
-gh variable list -R Keshav0375/Sentinel-deployment   # 3:  AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+az group delete --name rg-sentinel-bootstrap --yes
+az role definition delete --name "Sentinel Ops Start Stop"
 ```
 
----
-
-## Teardown — Owner-run, local, deliberate (§7.3)
-
-**There is no destroy workflow, and adding one would be a mistake.** R6, 2026-08-16:
-
-A full teardown has to *purge* the soft-deleted Key Vault. Deleted vaults live at
-**subscription** scope, and the CI identity holds nothing there — its RBAC Administrator is
-scoped to `sentinel-rg` by design. From CI the purge returns 403, `|| true` swallows it, and
-the next apply fails on a vault name that is reserved for another 7 days by a vault nobody
-can see. Granting CI a subscription-scope Key Vault role would fix the purge and hand a
-workflow reachable from `pull_request` triggers the ability to manage every vault in the
-subscription — a permanent privilege for a once-a-project operation.
-
-So teardown is a thing a human does, as Owner, on purpose:
-
-```bash
-# 0. Confirm the context. This deletes everything; the two-tenant hazard above is
-#    not a theoretical concern here.
-az account show --query "{sub:name, tenant:tenantId}" -o tsv
-
-# 1. Terraform-managed resources.
-az postgres flexible-server start -n sentinel-pg-0375 -g sentinel-rg   # or destroy errors
-terraform destroy
-
-# 2. The bootstrap-created resource groups Terraform only reads.
-az group delete --name sentinel-rg      --yes
-az group delete --name sentinel-func-rg --yes
-
-# 3. PURGE the vault. Without this, sentinel-kv-0375 is unusable for 7 days and a
-#    rebuild fails on the reserved name. This is the step CI cannot do.
-az keyvault purge --name sentinel-kv-0375 --location canadacentral
-
-# 4. State last — it describes everything above, so it goes when nothing needs it.
-az group delete --name sentinel-state-rg --yes
-```
-
-Rebuilding afterwards means starting again from Step 1: the bootstrap seams
-(`bootstrap-state.sh`, `bootstrap-oidc.sh`, the 7-object import) exist precisely because
-Terraform cannot create the identity and the storage its own pipeline runs on.
+Rebuilding afterwards starts again from step 1.

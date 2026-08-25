@@ -16,6 +16,10 @@
 # personally-owned tenant that holds the two backend-API app registrations and
 # nothing else (R4, resolved 2026-08-15). It is not added now because an unused
 # provider is dead weight the lock file would still pin.
+# Only azurerm is declared. `azuread` returns in phase 6 with the per-deployment
+# app registrations, `github` with per-deployment cross-repo distribution, and
+# `kubernetes` with the namespaces. An unused provider is dead weight the lock
+# file still pins and tflint still flags, so each arrives with its first consumer.
 # ─────────────────────────────────────────────────────────────────────────────
 
 terraform {
@@ -26,15 +30,7 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.0"
     }
-    github = {
-      source  = "integrations/github"
-      version = "~> 6.0"
-    }
     # Added at task 3.5, exactly as promised above: aliased to the personally-
     # owned IDENTITY tenant, used by identity.tf and nothing else.
-    azuread = {
-      source  = "hashicorp/azuread"
-      version = "~> 3.0"
-    }
   }
 }
