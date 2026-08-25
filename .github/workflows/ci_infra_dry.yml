@@ -267,7 +267,8 @@ jobs:
             -var="subscription_id=${TF_SUBSCRIPTION_ID}" \
             -var="location=${TF_LOCATION}" \
             -var="pg_admin_object_id=${TF_PG_ADMIN_OBJECT_ID}" \
-            -var="pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}" \n            -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}"
+            -var="pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}" \
+            -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}"
 
       - name: Comment plan on the pull request
         if: github.event_name == 'pull_request'
