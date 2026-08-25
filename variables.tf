@@ -1,177 +1,88 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Root input variables.
+# Root inputs.
 #
-# These names are a long-lived contract: every module in phases 2-4 consumes
-# them. Renaming one later is a breaking change across the whole repo.
+# Ten, down from twenty. Everything that used to be a variable — SKUs, sizes,
+# retention, which components to build — moved into
+# azure/config/deployment-config.yaml, because `workflow_dispatch` accepts at
+# most 10 inputs and the stack has roughly forty knobs.
 #
-# Deliberately absent:
-#   db_password                            — Postgres is Entra-only (rev-5)
-#   postgres_entra_admin_group_object_id   — the sentinel-db-admins group was
-#                                            removed in rev-9; admins attach directly
+# What survives here is only what the FORM must carry (which deployment, which
+# layer) plus identity values, which cannot live in a config file that a pull
+# request can edit.
 # ─────────────────────────────────────────────────────────────────────────────
 
-variable "subscription_id" {
-  description = "Azure subscription that hosts every Sentinel resource. Required by the azurerm v4 provider."
+variable "layer" {
+  description = "Which layer this workspace manages. `platform` builds the shared cluster, registry and database server; `deployment` builds one isolated deployment against them."
   type        = string
 
   validation {
-    condition     = can(regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", var.subscription_id))
-    error_message = "subscription_id must be a 36-character GUID."
+    condition     = contains(["platform", "deployment"], var.layer)
+    error_message = "layer must be `platform` or `deployment`."
   }
 }
 
-# NO DEFAULT, on purpose (R3). A silently defaulted region is a mistake that
-# propagates into every resource name and cannot be changed without a full
-# teardown. Resolved 2026-08-15 to canadacentral, supplied via the AZURE_LOCATION
-# GitHub variable in CI and terraform.tfvars locally — never hardcoded here.
+variable "deployment" {
+  description = "Deployment name — the unit of isolation. Constrained by modules/naming: 2-8 lowercase alphanumeric."
+  type        = string
+  default     = "sentinel"
+}
+
+variable "environment" {
+  description = "Environment within the deployment. The platform layer uses `plat`."
+  type        = string
+  default     = "plat"
+}
+
 variable "location" {
-  description = "Azure region for all resources, e.g. canadacentral. No default: see R3."
+  description = "Azure region. Must have an abbreviation in modules/naming, or the plan fails rather than emitting a malformed name."
   type        = string
-
-  validation {
-    condition     = length(trimspace(var.location)) > 0
-    error_message = "location must be set explicitly; it has no default."
-  }
+  default     = "canadacentral"
 }
 
-variable "resource_group_name" {
-  description = "Resource group holding every Sentinel resource. Created by the bootstrap, read as a data source."
-  type        = string
-  default     = "sentinel-rg"
-}
-
-variable "postgres_entra_admin_object_id" {
-  description = "Object ID of the human Entra principal that administers PostgreSQL (break-glass). From `az ad signed-in-user show --query id`."
-  type        = string
-
-  validation {
-    condition     = can(regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", var.postgres_entra_admin_object_id))
-    error_message = "postgres_entra_admin_object_id must be a 36-character GUID (an object ID, not a UPN)."
-  }
-}
-
-variable "postgres_entra_admin_principal_name" {
-  description = "UPN of that principal, e.g. you@uwindsor.ca. Must match the object ID above."
+variable "subscription_id" {
+  description = "Subscription that owns every resource. Mandatory on the azurerm v4 provider, which gives the root one explicit source instead of ambient ARM_* env."
   type        = string
 }
 
-variable "github_owner" {
-  description = "GitHub owner for the three Sentinel repos. Case-sensitive — OIDC federated-credential subjects are matched exactly."
-  type        = string
-  default     = "Keshav0375"
-
-  validation {
-    condition     = var.github_owner == "Keshav0375"
-    error_message = "github_owner must be exactly 'Keshav0375'. It is interpolated into all five federated-credential subjects, and Azure matches those case-sensitively — so 'keshav0375' or the old placeholder 'keshxvDev' would produce a login that fails with no diff to inspect. This guard is a typo catcher, not a policy: to genuinely change owner, update it here and in docs/BOOTSTRAP.md together."
-  }
-}
-
-variable "github_pat" {
-  description = "GitHub PAT with `repo` scope, used to push variables/secrets to the sibling repos (phase 4) and by the Function bridge. In CI this is the GH_PAT secret — GitHub reserves the GITHUB_ prefix."
-  type        = string
-  sensitive   = true
-}
-
-# ── Globally-unique resource names ────────────────────────────────────────────
-# Surfaced at the root so a collision really is a `terraform.tfvars` change, as
-# the module comments claim. Without this passthrough the defaults live inside
-# the modules and a collision would still be a code edit. Four of these names
-# were already taken by other tenants on first check (C12), so this is not
-# hypothetical.
-variable "registry_name" {
-  description = "Globally unique ACR name, alphanumeric only."
-  type        = string
-  default     = "sentinelacr0375"
-}
-
-variable "postgres_server_name" {
-  description = "Globally unique PostgreSQL server name — becomes <name>.postgres.database.azure.com."
-  type        = string
-  default     = "sentinel-pg-0375"
-}
-
-variable "key_vault_name" {
-  description = "Globally unique Key Vault name — becomes <name>.vault.azure.net."
-  type        = string
-  default     = "sentinel-kv-0375"
-}
-
-# The bootstrap scripts assert EXPECTED_SUB because an `az login` to the identity
-# tenant in any other terminal silently repoints every session (it happened during
-# infra 1.3). Terraform asserted nothing. subscription_id is pinned by variable, so
-# only the TENANT could drift — and tenant_id is ForceNew on the Postgres Entra
-# administrator, so a drifted apply would propose REPLACING it with a tenant the
-# server cannot authenticate against, and repointing the Key Vault, after which
-# every RBAC assignment on it resolves against the wrong directory.
+# Pinned rather than read from `data.azurerm_client_config`, and that is not a
+# style choice. `az` shares one context across terminals; a cross-tenant login
+# repoints it silently, and the Postgres `tenant_id` is ForceNew. Reading the
+# ambient context would let a stray `az login` propose destroying the database.
 variable "tenant_id" {
-  description = "Entra tenant that owns the subscription. Pinned rather than read from the ambient az context — see the note above. This is the SCHOOL tenant; the identity tenant (R4) is a separate variable added in phase 3."
+  description = "Entra tenant that owns the subscription — the SCHOOL tenant."
   type        = string
   default     = "12f933b3-3d61-4b19-9a4d-689021de8cc9"
-
-  validation {
-    condition     = can(regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", var.tenant_id))
-    error_message = "tenant_id must be a GUID."
-  }
 }
 
-variable "kv_admin_object_id" {
-  description = "Object ID of the human operator who seeds Key Vault secrets (§10 step 7). Same principal as postgres_entra_admin_object_id in practice, but declared separately because they are different concerns and may diverge."
-  type        = string
-}
-
-variable "dummy_api_name" {
-  description = "Globally unique name of the target web app (0375 convention — the bare dummy-api is taken)."
-  type        = string
-  default     = "dummy-api-0375"
-}
-
-variable "functions_storage_name" {
-  description = "Globally unique storage account backing the Functions Consumption plan."
-  type        = string
-  default     = "sentinelfunc0375"
-}
-
-variable "bridge_name" {
-  description = "Globally unique bridge function app name."
-  type        = string
-  default     = "sentinel-bridge-0375"
-}
-
-variable "event_topic_name" {
-  description = "Event Grid custom topic — its endpoint is a public DNS name."
-  type        = string
-  default     = "sentinel-events-0375"
-}
-
-variable "rotator_name" {
-  description = "Globally unique rotator function app name."
-  type        = string
-  default     = "sentinel-rotator-0375"
-}
-
-# ── Identity tenant (R4) ──────────────────────────────────────────────────────
 variable "identity_tenant_id" {
-  description = "The personally-owned Entra tenant holding ONLY the two backend-API app registrations (R4). Not the school tenant."
+  description = "The IDENTITY tenant (R4). Holds the per-deployment app registrations; the school tenant denies app creation at policy."
   type        = string
   default     = "eae0d3c6-af22-4b70-ad3b-12d625a06139"
 }
 
-# Auth-mode split for the aliased azuread provider. CORRECTED 2026-08-23: a
-# null provider arg does NOT block the env fallback — azuread still reads
-# ARM_CLIENT_ID when client_id is null. So in CI (where azure/login exports
-# ARM_CLIENT_ID for sentinel-gha, the WRONG identity for this tenant) the
-# workflows MUST pass -var identity_client_id AND -var identity_use_oidc=true
-# explicitly; a set provider arg overrides env. Locally both stay null/false
-# and no ARM_* env exists, so CLI-as-guest auth applies.
-variable "identity_client_id" {
-  description = "clientId of sentinel-tf-identity for CI OIDC auth to the identity tenant. Leave null locally — the guest-invited CLI login is used instead."
+# ── Values a config file must not hold ───────────────────────────────────────
+# These name a human. They belong to the run, not to the deployment.
+
+variable "pg_admin_object_id" {
+  description = "Object ID of the human Entra administrator on the Postgres server."
   type        = string
-  default     = null
 }
 
-variable "identity_use_oidc" {
-  description = "true in CI (GitHub OIDC exchange, as sentinel-tf-identity); false locally (az CLI as the guest-invited school account)."
-  type        = bool
-  default     = false
+variable "pg_admin_principal_name" {
+  description = "UPN of that administrator. Postgres stores it verbatim as the role name."
+  type        = string
 }
 
+# NOTE: `kv_admin_object_id` is deliberately absent until phase 6.
+#
+# Key Vault is a DEPLOYMENT-layer resource, so nothing consumes this yet, and an
+# unused variable is the same dead weight as an unused provider. When it returns:
+# it must NEVER be data.azurerm_client_config.current.object_id — under CI that
+# resolves to the pipeline identity and silently strips the human's Secrets
+# Officer rights.
+
+variable "state_storage_account" {
+  description = "State storage account, used by the deployment layer's remote-state lookup of the platform. Must match backend.tf, which cannot interpolate variables."
+  type        = string
+  default     = "stsentineltfb7fa37"
+}

@@ -24,10 +24,10 @@ terraform {
 }
 
 resource "azurerm_kubernetes_cluster" "sentinel" {
-  name                = "sentinel-aks"
+  name                = var.cluster_name
   location            = var.location
   resource_group_name = var.resource_group_name
-  dns_prefix          = "sentinel"
+  dns_prefix          = var.dns_prefix
 
   # Free control plane (no SLA — acceptable for a demo stack; the grant covers it).
   sku_tier = "Free"
@@ -48,7 +48,7 @@ resource "azurerm_kubernetes_cluster" "sentinel" {
     # bills ~$0.03/hr ONLY while the cluster is started (az aks stop between
     # runs). CONSEQUENCE: the node is arm64 — the backend image must be built
     # linux/arm64 (backend phase 7, docker buildx).
-    vm_size = "Standard_B2pls_v2"
+    vm_size = var.node_vm_size
 
     upgrade_settings {
       max_surge = "10%"
@@ -73,37 +73,13 @@ resource "azurerm_role_assignment" "aks_acr_pull" {
   skip_service_principal_aad_check = true
 }
 
-# CI runs az aks get-credentials + kubectl (deploy, scale, smoke). User Role is
-# enough — listClusterUserCredential — and deliberately not Admin.
-resource "azurerm_role_assignment" "gha_aks_user" {
-  scope                            = azurerm_kubernetes_cluster.sentinel.id
-  role_definition_name             = "Azure Kubernetes Service Cluster User Role"
-  principal_id                     = var.gha_principal_id
-  skip_service_principal_aad_check = true
-}
-
-# ── Backend workload identity ─────────────────────────────────────────────────
-# The UAMI the backend pod runs as. It reads LLM keys straight from Key Vault
-# (§3.3, enable_backend_reader) and is attached directly as a PostgreSQL Entra
-# admin (§3.2, enable_backend_admin, rev-9) — both toggles flipped at the root
-# with this identity's principal_id. No secret ever lands in a K8s Secret.
-resource "azurerm_user_assigned_identity" "backend" {
-  name                = "sentinel-backend-wi"
-  resource_group_name = var.resource_group_name
-  location            = var.location
-}
-
-# Federate the K8s service account to the UAMI. Subject is the ServiceAccount
-# the Deployment runs under; audience is the workload-identity exchange
-# audience. The consumer side (SA annotation azure.workload.identity/client-id
-# + pod label azure.workload.identity/use) lives in Sentinel/azure/k8s/.
-resource "azurerm_federated_identity_credential" "backend" {
-  # No resource_group_name: unused + deprecated in azurerm v4 — the same W1
-  # finding phase 1 fixed in oidc.tf, reintroduced here by copying the original
-  # §3.7 snippet. The parent identity carries the group.
-  name                      = "sentinel-backend-fic"
-  user_assigned_identity_id = azurerm_user_assigned_identity.backend.id
-  audience                  = ["api://AzureADTokenExchange"]
-  issuer                    = azurerm_kubernetes_cluster.sentinel.oidc_issuer_url
-  subject                   = "system:serviceaccount:sentinel:sentinel-backend"
-}
+# The per-deployment backend identity and its federated credential USED to live
+# here (phase 3). They moved to the deployment layer in phase 5: the cluster is
+# shared and each deployment gets its own namespace, its own UAMI and its own
+# federated subject `system:serviceaccount:<namespace>:<sa>`. Binding one
+# identity to the cluster module would have made every deployment share it —
+# which is precisely the isolation this design exists to provide.
+#
+# The `gha_aks_user` role assignment also went: gha-deploy now holds
+# "Azure Kubernetes Service Cluster Admin Role" at SUBSCRIPTION scope from
+# bootstrap-identities.sh, because it must reach a cluster it has not created yet.
