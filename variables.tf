@@ -84,20 +84,7 @@ variable "state_storage_account" {
   default     = "stsentineltfb7fa37"
 }
 
-variable "identity_client_id" {
-  description = "`sentinel-tf-identity`'s client ID, for the aliased azuread provider under CI. Empty locally, where the az CLI context is used instead."
-  type        = string
-  default     = ""
-}
-
-variable "identity_use_oidc" {
-  description = "Authenticate the azuread provider by GitHub OIDC. False locally; true in CI."
-  type        = bool
-  default     = false
-}
-
-variable "github_owner" {
-  description = "GitHub owner. Load-bearing for federated subjects — Azure matches them case-sensitively."
-  type        = string
-  default     = "Keshav0375"
-}
+# NOTE: `identity_client_id`, `identity_use_oidc` and `github_owner` were removed
+# on 2026-08-25 along with identity.tf and the azuread provider. Nothing reads
+# them, and tflint is right that an unused variable is the same dead weight as an
+# unused provider. They return together when the identity tenant is wired.

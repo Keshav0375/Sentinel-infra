@@ -223,7 +223,6 @@ jobs:
           TF_PG_ADMIN_OBJECT_ID: ${{ vars.PG_ADMIN_OBJECT_ID }}
           TF_PG_ADMIN_PRINCIPAL_NAME: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
           TF_KV_ADMIN_OBJECT_ID: ${{ vars.KV_ADMIN_OBJECT_ID }}
-          TF_IDENTITY_CLIENT_ID: ${{ vars.AZURE_IDENTITY_CLIENT_ID }}
         # plan-only is the DEFAULT deliberately: the destructive options should
         # be ones you choose, not ones you get by pressing Enter.
         run: |
@@ -244,9 +243,7 @@ jobs:
             -var="location=${TF_LOCATION}" \
             -var="pg_admin_object_id=${TF_PG_ADMIN_OBJECT_ID}" \
             -var="pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}" \
-            -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}" \
-            -var="identity_client_id=${TF_IDENTITY_CLIENT_ID}" \
-            -var="identity_use_oidc=true"
+            -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}"
 
       # ── Purge, or the name is held for 7 days ────────────────────────────
       # The azurerm provider purges on destroy by default, so this is a
