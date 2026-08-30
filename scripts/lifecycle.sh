@@ -138,6 +138,29 @@ select_workspace() {
   terraform workspace select "$1" 2>/dev/null || terraform workspace new "$1"
 }
 
+# Has the platform been APPLIED, not merely configured?
+#
+# A deployment cannot be PLANNED before the platform exists, and that is a
+# property of the design rather than a bug to route around: deployment.tf reads
+# the platform through `terraform_remote_state`, so the cluster name, the OIDC
+# issuer URL and the Postgres FQDN are not inputs it can compute -- they are the
+# platform's OUTPUTS, and outputs do not exist until an apply has produced them.
+# Terraform reports this as four unrelated-looking errors about an "object with
+# no attributes"; this check exists so the reason is stated once, plainly, before
+# that happens.
+#
+# `apply --scope all` is unaffected: the platform is applied FIRST, so by the
+# time the deployment runs its outputs are real. Only `plan` can reach a
+# deployment while the platform is still hypothetical.
+platform_is_applied() {
+  local current count
+  current="$(terraform workspace show)"
+  terraform workspace select platform >/dev/null 2>&1 || { echo "no"; return; }
+  count="$(terraform state list 2>/dev/null | grep -c . || true)"
+  terraform workspace select "${current}" >/dev/null 2>&1 || true
+  if [ "${count}" -gt 0 ]; then echo "yes"; else echo "no"; fi
+}
+
 # Non-empty state means the workspace still owns resources.
 workspace_resource_count() {
   terraform workspace select "$1" >/dev/null 2>&1 || { echo 0; return; }
@@ -241,6 +264,18 @@ case "${SCOPE}:${ACTION}" in
     run_layer platform sentinel plat
     ;;
 
+  deployment:plan)
+    if [ "$(platform_is_applied)" = "no" ]; then
+      echo "::error::the platform has not been applied, so this deployment cannot be planned." >&2
+      echo "::error::deployment.tf reads the cluster name, OIDC issuer and Postgres FQDN from" >&2
+      echo "::error::the platform's terraform_remote_state. Those are OUTPUTS — they do not" >&2
+      echo "::error::exist until the platform has been applied, so there is nothing to plan" >&2
+      echo "::error::against. Run apply with scope 'platform' (or scope 'all') first." >&2
+      exit 1
+    fi
+    run_layer deployment "${DEPLOYMENT}" "${ENVIRONMENT}"
+    ;;
+
   deployment:*)
     run_layer deployment "${DEPLOYMENT}" "${ENVIRONMENT}"
     ;;
@@ -260,6 +295,43 @@ case "${SCOPE}:${ACTION}" in
       echo "no deployment workspaces — going straight to the platform"
     fi
     run_layer platform sentinel plat
+    ;;
+
+  all:plan)
+    # The platform half is always plannable. The deployment half is only
+    # plannable once the platform's outputs exist.
+    run_layer platform sentinel plat
+
+    if [ "$(platform_is_applied)" = "yes" ]; then
+      run_layer deployment "${DEPLOYMENT}" "${ENVIRONMENT}"
+    else
+      echo
+      echo "──────────────────────────────────────────────────────────────────────"
+      echo "  SKIPPED: the deployment half cannot be planned yet"
+      echo "──────────────────────────────────────────────────────────────────────"
+      echo "The platform has not been applied, so it has no outputs, and"
+      echo "deployment.tf reads its cluster name, OIDC issuer URL and Postgres FQDN"
+      echo "from exactly those outputs. There is nothing to plan the deployment"
+      echo "against — not a misconfiguration, a property of splitting the two"
+      echo "layers into separate state files."
+      echo
+      echo "The platform plan above is complete and is the whole reviewable change."
+      echo "Run 'apply' with scope 'all': it applies the platform FIRST, so the"
+      echo "deployment then plans and applies against outputs that exist."
+      if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        {
+          echo "### Deployment plan skipped — platform not applied"
+          echo ""
+          echo "The platform plan above is complete. The deployment half reads the"
+          echo "platform's **outputs** through \`terraform_remote_state\`, and outputs do"
+          echo "not exist until an apply has produced them, so there is nothing to plan"
+          echo "it against yet."
+          echo ""
+          echo "Run \`apply\` with scope \`all\` — it applies the platform first, so the"
+          echo "deployment plans against real values."
+        } >> "${GITHUB_STEP_SUMMARY}"
+      fi
+    fi
     ;;
 
   all:*)
