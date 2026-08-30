@@ -50,6 +50,23 @@ resource "azurerm_kubernetes_cluster" "sentinel" {
     # linux/arm64 (backend phase 7, docker buildx).
     vm_size = var.node_vm_size
 
+    # 64 GB, not the 128 GB Azure defaults to. The OS disk is billed as a
+    # PROVISIONED Premium SSD, so the tier follows the size and not the usage:
+    # 128 GB is a P10, 64 GB is a P6, and the P6 is roughly half the price for a
+    # disk that holds an OS image and a handful of container layers. Measured on
+    # the 2026-08-30 cost report the P10 was 40% of the entire subscription's
+    # spend -- second only to the node itself.
+    #
+    # Ephemeral OS would be free, and is NOT available here: the `l` in
+    # B2pls_v2 means the SKU ships no local temp disk, and ephemeral requires
+    # one at least as large as the OS disk. Managed is the only option, so the
+    # only lever is size.
+    #
+    # 30 GB is the AKS floor. 64 leaves real headroom for image layers; 32 would
+    # save another few dollars and put us one large image away from a node that
+    # cannot pull. Not worth it.
+    os_disk_size_gb = var.node_os_disk_size_gb
+
     upgrade_settings {
       max_surge = "10%"
     }

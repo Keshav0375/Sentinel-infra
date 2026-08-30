@@ -29,6 +29,17 @@ variable "node_vm_size" {
   default     = "Standard_B2pls_v2"
 }
 
+variable "node_os_disk_size_gb" {
+  description = "Node OS disk size. Billed as a provisioned Premium SSD, so size picks the tier: 64 GB is a P6, the Azure default of 128 GB is a P10 at roughly twice the price. AKS floor is 30."
+  type        = number
+  default     = 64
+
+  validation {
+    condition     = var.node_os_disk_size_gb >= 30
+    error_message = "AKS requires an OS disk of at least 30 GB; got ${var.node_os_disk_size_gb}."
+  }
+}
+
 variable "tenant_id" {
   description = "Entra tenant for Kubernetes RBAC. Pinned from the root rather than read from the ambient az context — a cross-tenant login would otherwise repoint the cluster's trust."
   type        = string

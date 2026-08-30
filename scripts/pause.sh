@@ -10,7 +10,11 @@
 # (A line beginning `# shellcheck ...` is read as a DIRECTIVE, not a comment —
 # which is how the first draft of this header failed to parse.)
 #
-# ── Pause is NOT zero cost ───────────────────────────────────────────────────
+# ── Pause is NOT zero cost, and the numbers are on the summary ───────────────
+# running ~CAD 47/mo · paused ~CAD 14/mo · destroyed CAD 0, measured from the
+# 2026-08-30 cost report. A pause button that only says "not free" leaves the
+# reader to guess whether the remainder is pennies or most of it. It is most of
+# it once the node stops: the disk and the IP do not care about power state.
 # Stopping ends the COMPUTE charge, which dominates. These continue regardless:
 # OS disks, storage, the AKS load balancer, and ACR's flat daily charge. Only
 # destroy is zero. The summary says so, because a pause button that implies
@@ -124,10 +128,18 @@ $(az webapp list --query "[?kind!='functionapp'].[name,resourceGroup]" -o tsv | 
 EOF
 
 echo
-echo "Cannot be paused — these keep billing:"
-echo "  ACR                 flat daily charge; covered by the free grant"
+echo "Cannot be paused - these keep billing:"
+echo "  node OS disk        ~CAD 10/mo   provisioned Premium SSD, P6 at 64 GB"
+echo "  public IP           ~CAD  4/mo   the cluster's egress address"
+echo "  ACR                 flat daily; covered by the AzureForStudents grant"
 echo "  AKS load balancer   persists while the cluster exists"
-echo "  disks and storage   allocated regardless of power state"
+echo "  state storage       a few KB; rounds to zero"
+echo
+echo "  running   ~CAD 47/mo      paused   ~CAD 14/mo      destroyed   CAD 0"
+echo
+echo "Measured from the 2026-08-30 cost report, not estimated. Pause is the right"
+echo "call for hours or a day. For anything longer, destroy: apply rebuilds the"
+echo "platform in ~10 minutes and re-seeds the vault automatically."
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
@@ -136,8 +148,18 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo '```'
     echo "${report}"
     echo '```'
-    echo "**Still billing:** ACR (flat daily), the AKS load balancer, disks and storage."
-    echo "Only destroy is zero."
+    echo "**Still billing while paused:** the node OS disk (~CAD 10/mo), the public IP"
+    echo "(~CAD 4/mo), ACR, and the AKS load balancer. Stopping compute ends the"
+    echo "largest charge and not the others."
+    echo ""
+    echo "| state | cost |"
+    echo "|---|---|"
+    echo "| running | ~CAD 47/mo |"
+    echo "| paused | ~CAD 14/mo |"
+    echo "| destroyed | **CAD 0** |"
+    echo ""
+    echo "Pause for hours. For longer, destroy — \`apply\` with scope \`all\` rebuilds in"
+    echo "~10 minutes and re-seeds the vault, so the rebuild is cheap enough to prefer."
     if [ "${ACTION}" = "pause" ]; then
       echo ""
       echo "> Postgres auto-restarts after **7 days** — re-run to re-pause."

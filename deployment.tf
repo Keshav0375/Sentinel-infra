@@ -209,6 +209,9 @@ module "keyvault" {
   tenant_id          = var.tenant_id
   kv_admin_object_id = var.kv_admin_object_id
 
+  # Additional to kv_admin, never instead of it — the human keeps Officer.
+  seeder_principal_id = var.kv_seeder_object_id
+
   enable_bridge_reader   = local.want_functions
   bridge_principal_id    = try(module.functions[0].bridge_principal_id, null)
   enable_rotator_officer = local.want_functions

@@ -33,6 +33,12 @@ variable "kv_admin_object_id" {
   }
 }
 
+variable "seeder_principal_id" {
+  description = "Principal granted Key Vault Secrets Officer so the deploy workflow can seed secrets after apply. Empty disables the grant. Distinct from kv_admin_object_id, which is the human: both hold Officer, neither replaces the other."
+  type        = string
+  default     = ""
+}
+
 variable "ci_reader_principal_id" {
   description = "Principal granted Key Vault Secrets User so a backend workflow can read LLM/Datadog keys at incident time. Empty disables the grant — the consuming workflow and its identity do not exist until the backend phase."
   type        = string
