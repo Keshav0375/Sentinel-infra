@@ -91,6 +91,43 @@ resource "azurerm_role_assignment" "kv_admin" {
   principal_id         = var.kv_admin_object_id
 }
 
+# The CI identity that runs `apply`, so the workflow can SEED the vault
+# immediately after creating it.
+#
+# ── Why this does not contradict the rule two blocks up ──────────────────────
+# The comment on kv_admin refuses `data.azurerm_client_config.current.object_id`
+# because that principal CHANGES with whoever applies, so the human's Officer
+# rights would be destroyed by the first CI run. This is a different thing: an
+# explicit, ADDITIONAL principal. The human keeps Officer; CI gets its own.
+#
+# ── Why CI needs write at all ────────────────────────────────────────────────
+# Terraform still writes no secret -- that invariant is untouched, and the vault
+# is still created empty. The seeding happens after the apply, from the runner,
+# through the data plane, out of GitHub environment secrets. But `Contributor`
+# is a CONTROL-plane role: it can create a vault and cannot put a secret in one.
+# Without this grant the seed step 403s on every write.
+#
+# ── Why it is not a privilege escalation ─────────────────────────────────────
+# gha-deploy already holds subscription Contributor AND Role Based Access
+# Control Administrator, so it can mint exactly this assignment for itself in
+# one API call. Declaring it here does not grant a new power; it makes an
+# existing one explicit, reviewable in a diff, and destroyed with the vault.
+#
+# Default off. Empty id disables the grant, and the seed step then reports that
+# it cannot write rather than failing obscurely.
+resource "azurerm_role_assignment" "seeder_kv_officer" {
+  count                = var.seeder_principal_id == "" ? 0 : 1
+  scope                = azurerm_key_vault.sentinel.id
+  role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = var.seeder_principal_id
+
+  # Same reason as gha_kv_reader below: on a post-teardown rebuild Entra
+  # replication lags and the assignment fails with PrincipalNotFound. Create-only
+  # flag -- it fails with "doesn't support update" if added to an existing
+  # assignment.
+  skip_service_principal_aad_check = true
+}
+
 # A backend workflow reads secrets at incident-response time
 # (ci_incident_response fetches LLM and Datadog keys). Read-only: the pipeline
 # has no reason to write.

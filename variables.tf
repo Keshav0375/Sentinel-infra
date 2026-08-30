@@ -73,6 +73,17 @@ variable "pg_admin_principal_name" {
   type        = string
 }
 
+variable "kv_seeder_object_id" {
+  description = "Principal ID of the CI identity that seeds Key Vault after apply (gha-deploy). Resolved by the workflow from the bootstrap identity rather than stored as a repo variable, so it survives an identity rebuild. Empty disables the grant and the seed step says so."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.kv_seeder_object_id == "" || can(regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", var.kv_seeder_object_id))
+    error_message = "kv_seeder_object_id must be empty or a GUID (an object ID, not a client ID)."
+  }
+}
+
 variable "kv_admin_object_id" {
   description = "Object ID granted Key Vault Secrets Officer on each deployment's vault — the human who seeds secrets by hand. Deliberately separate from pg_admin_object_id: the same person today need not be the same person forever. NEVER data.azurerm_client_config.current.object_id — under CI that resolves to the pipeline identity and silently strips the human's access."
   type        = string

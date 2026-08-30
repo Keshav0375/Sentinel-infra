@@ -199,16 +199,29 @@ laptop.
 |---|---|
 | `deployment` | `demo1` |
 | `action` | `apply` |
-| `layer` | `deployment` |
+| `scope` | `deployment` |
 | `environment_name` | `dev` |
 
 Everything else is optional. That is the whole instruction — a deployment absent
 from `azure/config/deployment-config.yaml` inherits `defaults:` entirely, so no file edit is
 needed. Add a block there only when a deployment must differ.
 
-**To tear it down:** same workflow, `action: destroy`, and retype the deployment name in
-`confirm`. The retype is the only friction and it is deliberate — it is the difference between
-an irreversible action and a mis-click. The platform layer refuses to be destroyed here at all.
+**To tear it down:** same workflow, `action: destroy`, and retype the confirmation. The retype is
+the only friction and it is deliberate — it is the difference between an irreversible action and
+a mis-click. What you type depends on the scope:
+
+| `scope` | `confirm` | destroys |
+|---|---|---|
+| `deployment` | the deployment name | that deployment only |
+| `platform` | `platform` | the shared cluster/registry/database — **refused** while any deployment still holds state |
+| `all` | `destroy-everything` | every deployment, then the platform, in that order |
+
+`scope: all` is the one that reaches zero. Afterwards the verify job asserts against Azure that
+the subscription holds only `rg-sentinel-bootstrap` and `NetworkWatcherRG` — both $0 — and fails
+red if anything else survived. A green verify job is the proof; a green destroy is not.
+
+**Apply works the same way in reverse.** `scope: all` builds the platform first, then the named
+deployment, then seeds its vault. One press from an empty subscription to a working stack.
 
 **To pause everything without deleting:** Actions → *Sentinel — Pause / Resume*.
 
@@ -229,7 +242,23 @@ this needs no file edit. Add a block there only when a deployment must differ.
 literal `@Microsoft.KeyVault(...)` string. The handlers detect that and log rather than crashing
 — a deployment with an unseeded vault is a *valid* state, it just cannot dispatch.
 
-Get the vault name from the deployment's outputs (`terraform output names`), then:
+**This is now automatic.** The deploy workflow's *Seed the vault* step writes these from the
+GitHub `production` environment secrets after every apply, so a destroy → recreate cycle comes
+back with a working vault and no manual step. Populate the secrets once with
+`bash scripts/set-gh-secrets.sh` (which reads `.env`; copy `.env.example` and fill it), and the
+rebuild loop stops needing you.
+
+The step is idempotent by design: it writes only when a secret is absent or within 30 days of
+expiring. Writing on every apply would keep resetting the expiry clock the rotation Function
+watches, so `SecretNearExpiry` would never fire and nothing would ever rotate.
+
+`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are deliberately **not** in that list. Both vendors
+support workload identity federation, so the backend pod will authenticate with its projected
+service-account token and there is no key to store — see `architecture/decisions.md` 2026-08-30
+in `sentinel-brain`. Built in backend phase 7.
+
+To seed by hand instead, get the vault name from the deployment's outputs
+(`terraform output names`), then:
 
 **Terraform never writes a runtime secret.** The vault is created empty on purpose: a secret in
 state is a secret in a storage account, readable by anything with state access and visible in
@@ -299,7 +328,16 @@ resource IDs.
 
 ## Teardown
 
-**A deployment** tears down through its own workflow, or:
+**The workflow is the supported path, including for the platform.** Actions → *Sentinel Infra —
+Deploy* → `action: destroy`, `scope: all`, `confirm: destroy-everything`. It destroys every
+deployment first and the platform last — the order matters, because a deployment reads the
+platform through `terraform_remote_state` and holds a namespace on its cluster and a database on
+its Postgres server. Destroying the platform first does not fail loudly; it leaves orphaned state
+describing resources that no longer exist.
+
+Everything below is the same thing by hand, for when you want to watch it happen.
+
+**A deployment:**
 
 ```bash
 terraform workspace select demo1-dev
@@ -311,7 +349,8 @@ The Key Vault needs no manual purge: the azurerm provider purges on destroy by d
 name is immediately reusable. That is what makes destroy → recreate of the same deployment name
 work at all.
 
-**The platform**, only when nothing depends on it:
+**The platform**, only when nothing depends on it — `scripts/lifecycle.sh` enforces this and a
+hand-run does not, so check `terraform workspace list` first:
 
 ```bash
 terraform workspace select platform
@@ -326,3 +365,31 @@ az role definition delete --name "Sentinel Ops Start Stop"
 ```
 
 Rebuilding afterwards starts again from step 1.
+
+**Verify, do not assume.** A `terraform destroy` that exits 0 has proved only that everything in
+state is gone. It cannot speak for a resource dropped from state by a failed apply. On 2026-08-30
+an entire deployment — a resource group, a Key Vault, and a database on the shared Postgres
+server — was found alive five days after it was believed destroyed, with every exit code 0. Run
+the referee:
+
+```bash
+bash scripts/verify-estate.sh --mode destroyed --scope all
+```
+
+---
+
+## Reconciling drift (what `refresh-only` used to do)
+
+The deploy workflow no longer offers `refresh-only`. It was one arrow-key from `destroy` in the
+same dropdown, and `apply -refresh-only` will happily **drop resources from state** when the API
+reports them gone — making them invisible to every later destroy, which is the exact leak the
+teardown work exists to prevent.
+
+Its real use is reconciling after someone edits a resource in the portal. That is a twice-a-year
+operation, best run locally with your eyes on the output:
+
+```bash
+terraform workspace select <workspace>
+terraform plan -refresh-only          # look at what it proposes FIRST
+terraform apply -refresh-only         # only if the proposal is what you expect
+```

@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Deploy — creates and destroys deployments. The only automated writer.
+# Deploy — creates, seeds, and destroys the estate. The only automated writer.
 #
 # ── Dispatch only, and that is a consequence not a preference ────────────────
 # Push-to-main auto-apply cannot survive multi-deployment: a push has no way to
@@ -9,14 +9,36 @@
 # Declaring `environment: X` rewrites the OIDC subject to
 # `repo:<owner>/<repo>:environment:X`, replacing the branch form. Those are the
 # only subjects gha-deploy federates on, and GitHub will not mint them for a
-# `pull_request` — so the identity that can destroy the subscription's contents
-# is unreachable from a PR by construction, not by a rule someone could
-# misconfigure.
+# `pull_request` — so the identity that can empty the subscription is
+# unreachable from a PR by construction, not by a rule someone could
+# misconfigure. Apply and destroy use DIFFERENT environments, so a required
+# reviewer can be attached to destruction alone.
 #
-# Apply and destroy use DIFFERENT environments, so a required reviewer can be
-# attached to destruction alone. One job with an expression rather than two jobs:
-# duplicating every step is how the two paths drift, and destroy is meant to be
-# the same code path with a different credential.
+# ── What changed on 2026-08-30, and why ──────────────────────────────────────
+# A deployment (rg-demo1-dev-cc: a resource group, a Key Vault, and a database
+# on the SHARED Postgres server) was found alive five days after it was believed
+# destroyed. Every exit code in that history was 0. Four defects, four fixes:
+#
+#   the platform could not be destroyed here    ->  scope 'platform' and 'all'
+#     at all, and the platform is ~100% of the        now run, gated behind the
+#     subscription's cost                             destroy environment
+#
+#   nothing enforced destroy ORDER, so a        ->  scripts/lifecycle.sh puts
+#     platform teardown could orphan every            dependents before the
+#     deployment's state                              dependency, always
+#
+#   the empty-workspace check was written as    ->  a non-empty workspace after
+#     `|| echo "::warning::"`, so its failure          destroy is a hard failure
+#     was invisible
+#
+#   NOTHING ever asked Azure what survived      ->  verify-estate.sh, run as the
+#                                                   READ-ONLY identity
+#
+# `refresh-only` was removed by the same change. Its real use — reconciling
+# after a portal edit — is a twice-a-year local operation, and `apply
+# -refresh-only` can DROP resources from state when the API reports them gone,
+# making them invisible to every later destroy. It sat one arrow-key from
+# `destroy` in the same dropdown. See docs/BOOTSTRAP.md for the local one-liner.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: "Sentinel Infra — Deploy"
@@ -24,35 +46,40 @@ name: "Sentinel Infra — Deploy"
 on:
   workflow_dispatch:
     inputs:
-      deployment:
-        description: 'Deployment name. 2-8 lowercase alphanumeric. This is the only input you must set.'
-        type: string
-        required: true
-        default: sentinel
       action:
-        description: 'plan-only = show the diff and stop · apply = create/update · destroy = tear down · refresh-only = reconcile state'
+        description: 'plan = show the diff and stop · apply = create/update/seed · destroy = tear down'
         type: choice
         required: true
-        default: plan-only
-        options: [plan-only, apply, destroy, refresh-only]
-      layer:
-        description: 'platform = the shared cluster/registry/database · deployment = one isolated deployment'
+        default: plan
+        options: [plan, apply, destroy]
+      scope:
+        description: 'deployment = one isolated deployment · platform = the shared cluster/registry/database · all = both, in dependency order'
         type: choice
         required: true
         default: deployment
-        options: [deployment, platform]
+        options: [deployment, platform, all]
+      deployment:
+        description: 'Deployment name. 2-8 lowercase alphanumeric. Ignored when scope is platform.'
+        type: string
+        required: true
+        default: sentinel
       environment_name:
-        description: 'Environment within the deployment. The platform layer uses `plat`.'
+        description: 'Environment within the deployment. The platform layer always uses `plat`.'
         type: string
         required: false
         default: dev
       confirm:
-        description: 'DESTROY ONLY — retype the deployment name exactly. Anything else aborts.'
+        description: 'DESTROY ONLY — type the deployment name · or `platform` · or `destroy-everything` for scope all.'
         type: string
         required: false
         default: ''
+      seed_secrets:
+        description: 'After apply, write the GitHub environment secrets into the Key Vault.'
+        type: boolean
+        required: false
+        default: true
       target:
-        description: 'Optional single resource address for -target. Escape hatch; leave blank.'
+        description: 'Single resource address for -target. PLAN ONLY — a partial apply or destroy leaves state no plan agrees with.'
         type: string
         required: false
         default: ''
@@ -69,38 +96,56 @@ env:
   TF_VERSION: "1.15.8"
 
 jobs:
-  run-deploy:
-    name: ${{ inputs.action == 'destroy' && 'Run Destroy' || 'Run Deploy' }}
+  run:
+    name: ${{ inputs.action }} · ${{ inputs.scope }}
     runs-on: ubuntu-latest
 
     # Destruction gets its own environment, so its approval rules are its own.
     environment: ${{ inputs.action == 'destroy' && 'destroy' || 'production' }}
 
+    outputs:
+      vault: ${{ steps.vault.outputs.name }}
+
     steps:
       # ── Guards, BEFORE authenticating ────────────────────────────────────
-      # A refused destroy should cost nothing and reach nothing. Checking after
+      # A refused run should cost nothing and reach nothing. Checking after
       # azure/login would mean a token was minted for a run that was never going
-      # to be allowed.
-      - name: Check destroy guards
-        if: inputs.action == 'destroy'
+      # to be allowed. lifecycle.sh repeats these so a LOCAL run is guarded too;
+      # this copy exists to fail in two seconds instead of ninety.
+      - name: Check guards
         env:
+          ACTION: ${{ inputs.action }}
+          SCOPE: ${{ inputs.scope }}
           DEPLOYMENT: ${{ inputs.deployment }}
           CONFIRM: ${{ inputs.confirm }}
-          LAYER: ${{ inputs.layer }}
+          TARGET: ${{ inputs.target }}
         run: |
-          if [ "${LAYER}" = "platform" ]; then
-            echo "::error::The platform layer cannot be destroyed from this workflow."
-            echo "::error::It is shared by every deployment; tearing it down is a deliberate"
-            echo "::error::local procedure (docs/BOOTSTRAP.md), not a button."
+          if [ -n "${TARGET}" ] && [ "${ACTION}" != "plan" ]; then
+            echo "::error::target is accepted only with action 'plan'."
+            echo "::error::A partial apply or destroy leaves state that no full plan ever"
+            echo "::error::agreed with — which is how a half-destroyed deployment is made."
             exit 1
           fi
-          if [ "${CONFIRM}" != "${DEPLOYMENT}" ]; then
-            echo "::error::confirm ('${CONFIRM}') does not match deployment ('${DEPLOYMENT}')."
-            echo "::error::Retype the deployment name exactly. This is the only thing standing"
-            echo "::error::between a mis-click and an irreversible action."
+
+          if [ "${ACTION}" != "destroy" ]; then
+            echo "no destroy guards needed for ${ACTION}"
+            exit 0
+          fi
+
+          case "${SCOPE}" in
+            deployment) expected="${DEPLOYMENT}" ;;
+            platform)   expected="platform" ;;
+            all)        expected="destroy-everything" ;;
+            *)          expected="" ;;
+          esac
+
+          if [ "${CONFIRM}" != "${expected}" ]; then
+            echo "::error::confirm ('${CONFIRM}') does not match. Scope '${SCOPE}' requires exactly: ${expected}"
+            echo "::error::Retype it. This is the only thing standing between a mis-click"
+            echo "::error::and an irreversible action."
             exit 1
           fi
-          echo "destroy confirmed for ${DEPLOYMENT}"
+          echo "destroy confirmed for scope ${SCOPE}"
 
       - name: Check out
         uses: actions/checkout@v4
@@ -124,26 +169,35 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # The checks a plan structurally cannot make. Runs here rather than in the
-      # PR preflight because name availability is a POST */action that the plan
-      # identity cannot perform — and these are the ones that must not fail
-      # mid-apply.
+      # The checks a plan structurally cannot make. Here rather than in the PR
+      # preflight because name availability is a POST */action that the plan
+      # identity cannot perform.
       - name: Preflight
         if: inputs.action == 'apply'
         env:
           AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
         run: |
           # `bash` rather than direct execution — the exec bit does not survive a
           # Windows checkout, and the failure is CI-only.
           bash ./scripts/preflight.sh --mode apply \
-            --deployment "${{ inputs.deployment }}" \
-            --environment "${{ inputs.environment_name }}"
+            --deployment "${DEPLOYMENT}" \
+            --environment "${ENVIRONMENT_NAME}"
 
-      # Unlike the PR plan, this identity CAN start the database. Stopped is its
-      # normal idle state, so an apply that did not check would fail most of the
-      # time. Iterates every server: `database.mode: dedicated` means there can
-      # be several.
-      - name: Ensure databases are running
+      # ── Wake what the run will touch ─────────────────────────────────────
+      # Stopped is the normal idle state for both, and each fails differently
+      # when asleep: Postgres 400s the refresh with ServerStoppedError, and a
+      # stopped cluster PLANS fine then fails the apply with
+      # OperationNotAllowed. That asymmetry is why this checks rather than
+      # trusting a green plan.
+      #
+      # Destroying a DEPLOYMENT needs the cluster awake too — the kubernetes
+      # provider must authenticate to remove the namespace. Destroying only the
+      # platform does not, and lifecycle.sh has already proved no deployment
+      # exists in that case.
+      - name: Ensure the platform is awake
+        if: inputs.action == 'apply' || (inputs.action == 'destroy' && inputs.scope != 'platform')
         run: |
           while IFS=$'\t' read -r name rg; do
             [ -n "${name}" ] || continue
@@ -154,11 +208,6 @@ jobs:
             fi
           done <<< "$(az postgres flexible-server list --query "[].[name,resourceGroup]" -o tsv)"
 
-      # A stopped cluster PLANS fine and then fails the apply with
-      # `OperationNotAllowed`. The asymmetry is why this checks rather than
-      # assuming the plan's success meant anything.
-      - name: Ensure the cluster is running
-        run: |
           while IFS=$'\t' read -r name rg; do
             [ -n "${name}" ] || continue
             state="$(az aks show -g "${rg}" -n "${name}" --query powerState.code -o tsv)"
@@ -177,124 +226,171 @@ jobs:
           ARM_USE_OIDC: "true"
         run: terraform init -input=false
 
-      - name: Select workspace
-        env:
-          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
-          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          ARM_USE_OIDC: "true"
-          TF_LAYER: ${{ inputs.layer }}
-          TF_DEPLOYMENT: ${{ inputs.deployment }}
-          TF_ENVIRONMENT: ${{ inputs.environment_name }}
+      # ── Who may write secrets into the vault ─────────────────────────────
+      # Resolved live rather than stored as a repository variable, because the
+      # identity is recreated by bootstrap-identities.sh and a stale GUID in a
+      # variable would fail as a silent no-grant that surfaces only at seed
+      # time. Empty is tolerated: modules/keyvault skips the grant and the seed
+      # step explains why it cannot write.
+      - name: Resolve the seeder principal
+        id: seeder
         run: |
-          if [ "${TF_LAYER}" = "platform" ]; then ws=platform; else ws="${TF_DEPLOYMENT}-${TF_ENVIRONMENT}"; fi
-          echo "workspace: ${ws}"
-          echo "TF_WORKSPACE_NAME=${ws}" >> "$GITHUB_ENV"
-          terraform workspace select "${ws}" 2>/dev/null || terraform workspace new "${ws}"
+          pid="$(az identity show -g rg-sentinel-bootstrap -n gha-deploy \
+                   --query principalId -o tsv 2>/dev/null || true)"
+          if [ -z "${pid}" ]; then
+            echo "::warning::could not resolve gha-deploy's principal id; the vault grant"
+            echo "::warning::will be skipped and seeding will not be able to write."
+          else
+            echo "seeder principal: ${pid}"
+          fi
+          echo "principal_id=${pid}" >> "$GITHUB_OUTPUT"
 
-      # ── Capture the vault name BEFORE destroying the state that holds it ──
-      # The purge below needs a name that only exists in the state `destroy` is
-      # about to remove. Reading it afterwards would be reading nothing.
-      - name: Capture vault name
-        if: inputs.action == 'destroy'
+      # ── The whole lifecycle, in dependency order ─────────────────────────
+      # One script rather than a job matrix: GitHub does not guarantee matrix
+      # ordering even at max-parallel 1, and the ordering here IS the safety
+      # property. A bash sequence is ordered by construction.
+      #
+      # Inputs travel through `env:` rather than being interpolated into the
+      # command line — `${{ }}` spliced into a `run:` block is the standard
+      # Actions script-injection surface, and `deployment` is a free-text field.
+      - name: Run ${{ inputs.action }}
         env:
           ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           ARM_USE_OIDC: "true"
-        run: |
-          kv="$(terraform output -json names 2>/dev/null | jq -r '.key_vault // empty')"
-          echo "vault to purge after destroy: ${kv:-<none>}"
-          echo "KV_TO_PURGE=${kv}" >> "$GITHUB_ENV"
-
-      - name: ${{ inputs.action == 'destroy' && 'Destroy' || 'Deploy' }}
-        env:
-          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
-          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          ARM_USE_OIDC: "true"
-          TF_ACTION: ${{ inputs.action }}
-          TF_TARGET: ${{ inputs.target }}
-          TF_LAYER: ${{ inputs.layer }}
-          TF_DEPLOYMENT: ${{ inputs.deployment }}
-          TF_ENVIRONMENT: ${{ inputs.environment_name }}
           TF_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           TF_LOCATION: ${{ vars.AZURE_LOCATION }}
           TF_PG_ADMIN_OBJECT_ID: ${{ vars.PG_ADMIN_OBJECT_ID }}
           TF_PG_ADMIN_PRINCIPAL_NAME: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
           TF_KV_ADMIN_OBJECT_ID: ${{ vars.KV_ADMIN_OBJECT_ID }}
-        # plan-only is the DEFAULT deliberately: the destructive options should
-        # be ones you choose, not ones you get by pressing Enter.
+          TF_KV_SEEDER_OBJECT_ID: ${{ steps.seeder.outputs.principal_id }}
+          ACTION: ${{ inputs.action }}
+          SCOPE: ${{ inputs.scope }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+          CONFIRM: ${{ inputs.confirm }}
+          TARGET: ${{ inputs.target }}
         run: |
-          args=(-no-color -input=false)
-          if [ -n "${TF_TARGET}" ]; then args+=("-target=${TF_TARGET}"); fi
-          case "${TF_ACTION}" in
-            plan-only)    verb=plan ;;
-            destroy)      verb=destroy; args+=(-auto-approve) ;;
-            refresh-only) verb=apply;   args+=(-auto-approve -refresh-only) ;;
-            *)            verb=apply;   args+=(-auto-approve) ;;
-          esac
-          echo "running: terraform ${verb} ${args[*]}"
-          terraform "${verb}" "${args[@]}" \
-            -var="layer=${TF_LAYER}" \
-            -var="deployment=${TF_DEPLOYMENT}" \
-            -var="environment=${TF_ENVIRONMENT}" \
-            -var="subscription_id=${TF_SUBSCRIPTION_ID}" \
-            -var="location=${TF_LOCATION}" \
-            -var="pg_admin_object_id=${TF_PG_ADMIN_OBJECT_ID}" \
-            -var="pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}" \
-            -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}"
+          bash ./scripts/lifecycle.sh \
+            --action "${ACTION}" \
+            --scope "${SCOPE}" \
+            --deployment "${DEPLOYMENT}" \
+            --environment "${ENVIRONMENT_NAME}" \
+            --confirm "${CONFIRM}" \
+            --target "${TARGET}"
 
-      # ── Purge, or the name is held for 7 days ────────────────────────────
-      # The azurerm provider purges on destroy by default, so this is a
-      # belt-and-braces sweep for a vault left soft-deleted by an interrupted
-      # run. Without it, recreating the same deployment fails on a vault nobody
-      # can see — which is exactly the destroy → recreate cycle this platform
-      # exists to support.
-      - name: Purge the vault
-        if: inputs.action == 'destroy'
-        env:
-          LOCATION: ${{ vars.AZURE_LOCATION }}
-        run: |
-          if [ -z "${KV_TO_PURGE:-}" ]; then
-            echo "no vault name captured — nothing to purge"
-            exit 0
-          fi
-          if az keyvault list-deleted --query "[?name=='${KV_TO_PURGE}'].name" -o tsv | grep -q .; then
-            echo "purging ${KV_TO_PURGE}"
-            az keyvault purge --name "${KV_TO_PURGE}" --location "${LOCATION}"
-          else
-            echo "${KV_TO_PURGE} is already fully deleted (the provider purges on destroy)"
-          fi
-
-      # A workspace left behind after a destroy is an empty state file that
-      # makes `terraform workspace list` lie about what exists.
-      - name: Remove the empty workspace
-        if: inputs.action == 'destroy'
+      # ── Seed the vault ───────────────────────────────────────────────────
+      # After the apply, over the DATA plane, from GitHub environment secrets.
+      # Terraform writes no secret and that invariant is untouched — the vault is
+      # still created empty; this fills it one step later.
+      - name: Find the vault
+        id: vault
+        if: inputs.action == 'apply' && inputs.scope != 'platform'
         env:
           ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           ARM_USE_OIDC: "true"
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
         run: |
-          terraform workspace select platform
-          terraform workspace delete "${TF_WORKSPACE_NAME}" || \
-            echo "::warning::workspace ${TF_WORKSPACE_NAME} not empty; left in place"
+          terraform workspace select "${DEPLOYMENT}-${ENVIRONMENT_NAME}"
+          name="$(terraform output -json names 2>/dev/null | jq -r '.key_vault // empty')"
+          echo "vault: ${name:-<none>}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Seed the vault
+        if: inputs.action == 'apply' && inputs.scope != 'platform' && inputs.seed_secrets
+        env:
+          VAULT: ${{ steps.vault.outputs.name }}
+          DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+          DATADOG_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          if [ -z "${VAULT}" ]; then
+            echo "::warning::no Key Vault in this deployment — nothing to seed"
+            exit 0
+          fi
+          bash ./scripts/seed-vault.sh --vault "${VAULT}"
 
       - name: Summary
         if: always()
+        env:
+          VAULT: ${{ steps.vault.outputs.name }}
         run: |
           {
-            echo "### ${{ inputs.action }} · ${{ inputs.deployment }} (${{ inputs.layer }})"
+            echo "### ${{ inputs.action }} · scope \`${{ inputs.scope }}\`"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| workspace | \`${TF_WORKSPACE_NAME:-unknown}\` |"
+            echo "| deployment | \`${{ inputs.deployment }}-${{ inputs.environment_name }}\` |"
             echo "| environment | \`${{ inputs.action == 'destroy' && 'destroy' || 'production' }}\` |"
-            if [ "${{ inputs.action }}" = "apply" ]; then
+            echo "| vault | \`${VAULT:-n/a}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── The referee ─────────────────────────────────────────────────────────────
+  # Runs as gha-PLAN, not gha-deploy, and that is the point: the identity that
+  # checks the estate holds Reader and cannot change what it is checking. A
+  # verifier able to fix its own findings is not a verifier.
+  #
+  # `always()` because a run that failed HALFWAY is exactly when you most need to
+  # know what survived. It cannot mask a failure — `needs` already carries the
+  # run job's result into the workflow's own conclusion.
+  verify:
+    name: Verify against Azure
+    needs: [run]
+    if: always() && inputs.action != 'plan'
+    runs-on: ubuntu-latest
+    environment: plan
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify
+        env:
+          ACTION: ${{ inputs.action }}
+          SCOPE: ${{ inputs.scope }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        run: |
+          mode="applied"
+          if [ "${ACTION}" = "destroy" ]; then mode="destroyed"; fi
+          bash ./scripts/verify-estate.sh \
+            --mode "${mode}" \
+            --scope "${SCOPE}" \
+            --deployment "${DEPLOYMENT}" \
+            --environment "${ENVIRONMENT_NAME}"
+
+      - name: Summary
+        if: always()
+        env:
+          ACTION: ${{ inputs.action }}
+          SCOPE: ${{ inputs.scope }}
+        run: |
+          {
+            echo "### Verification"
+            echo ""
+            if [ "${ACTION}" = "destroy" ] && [ "${SCOPE}" = "all" ]; then
+              echo "Asserted: the subscription holds **only** \`rg-sentinel-bootstrap\`"
+              echo "(Terraform state + the three OIDC identities) and \`NetworkWatcherRG\`."
               echo ""
-              echo "⚠️ The Key Vault ships **empty** — Terraform writes no secrets, because a"
-              echo "secret in state is readable by anything with state access. The bridge cannot"
-              echo "dispatch until they are seeded. See \`docs/BOOTSTRAP.md\`."
+              echo "Both are \$0 — managed identities are free, Network Watcher is free and"
+              echo "Azure recreates it regardless, and the state blobs are a few KB."
+              echo ""
+              echo "**If this job is green, the estate costs nothing.**"
             fi
+            echo ""
+            echo "See the job log for the per-check breakdown."
           } >> "$GITHUB_STEP_SUMMARY"

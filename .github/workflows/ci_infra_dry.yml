@@ -270,6 +270,42 @@ jobs:
             -var="pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}" \
             -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}"
 
+      # ── State the teardown contract next to the plan ─────────────────────
+      # A plan is a promise about what apply will build. Nothing here previously
+      # said what DESTROY would later be held to, so the two halves of the
+      # lifecycle were reviewed against different standards. These are the exact
+      # assertions scripts/verify-estate.sh makes after a real teardown — printed
+      # here so a reviewer sees the contract at review time rather than
+      # discovering it in a red job.
+      - name: Print the teardown contract
+        if: always()
+        env:
+          TF_LAYER: ${{ inputs.layer || 'platform' }}
+          TF_DEPLOYMENT: ${{ inputs.deployment || 'sentinel' }}
+          TF_ENVIRONMENT: ${{ inputs.environment_name || 'plat' }}
+        run: |
+          {
+            echo "### Teardown contract"
+            echo ""
+            echo "After \`destroy\`, \`verify-estate.sh\` asserts against **Azure** — not"
+            echo "against Terraform state, which is what a destroy has just finished"
+            echo "editing and therefore cannot be a witness for."
+            echo ""
+            if [ "${TF_LAYER}" = "platform" ]; then
+              echo "- no AKS cluster, Postgres server, or registry named \`*-sentinel-plat*\`"
+              echo "- \`rg-sentinel-plat-cc\` and its \`MC_\` node group are gone"
+            else
+              echo "- \`rg-${TF_DEPLOYMENT}-${TF_ENVIRONMENT}-cc\` is gone"
+              echo "- \`rg-${TF_DEPLOYMENT}-${TF_ENVIRONMENT}-func-cc\` is gone"
+              echo "- no \`${TF_DEPLOYMENT}_${TF_ENVIRONMENT}\` database on the SHARED Postgres server"
+            fi
+            echo "- no soft-deleted Key Vault holding a globally unique name"
+            echo "- the workspace holds zero resources and its state blob is deleted"
+            echo ""
+            echo "With scope \`all\`, one assertion covers everything: the subscription"
+            echo "holds only \`rg-sentinel-bootstrap\` and \`NetworkWatcherRG\`, both \$0."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Comment plan on the pull request
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
