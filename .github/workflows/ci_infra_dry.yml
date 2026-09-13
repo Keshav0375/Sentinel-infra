@@ -219,6 +219,7 @@ jobs:
         run: terraform init -input=false
 
       - name: Select workspace
+        id: workspace
         env:
           ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PLAN }}
           ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
@@ -233,8 +234,34 @@ jobs:
           else
             ws="${TF_DEPLOYMENT}-${TF_ENVIRONMENT}"
           fi
-          echo "workspace: ${ws}"
-          terraform workspace select "${ws}" 2>/dev/null || terraform workspace new "${ws}"
+
+          # -- `workspace new` is a blob WRITE, and this identity cannot -------
+          # It creates the state blob and takes a lock. gha-plan holds Storage
+          # Blob Data READER, deliberately -- it is the identity a pull request
+          # can trigger. So `|| terraform workspace new` could never work here;
+          # it only ever succeeded because the workspace already existed.
+          #
+          # A missing workspace is also the NORMAL state, not an error. This
+          # estate is destroyed to zero between demos and lifecycle.sh removes
+          # the workspace as part of reaching zero. On 2026-09-12 a full destroy
+          # did exactly that, and every PR plan afterwards failed with
+          # `403 AuthorizationPermissionMismatch` naming a permission nobody
+          # intended it to have.
+          #
+          # `default` always exists and holds nothing, so planning there needs no
+          # write and still answers the question a PR plan exists to answer:
+          # against an empty estate, what does this configuration build? Every
+          # resource reads as "to create", which is the truth.
+          if terraform workspace select "${ws}" 2>/dev/null; then
+            echo "workspace: ${ws}"
+            echo "empty_state=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::workspace '${ws}' does not exist - nothing is deployed."
+            echo "::notice::Planning against an empty state; every resource reads as 'to create'."
+            terraform workspace select default
+            echo "workspace: default (no ${ws} state)"
+            echo "empty_state=true" >> "$GITHUB_OUTPUT"
+          fi
 
       # Values travel through `env:` rather than being interpolated into the
       # command line: `${{ }}` spliced into a `run:` block is the standard
@@ -299,8 +326,16 @@ jobs:
           TF_LAYER: ${{ inputs.layer || 'platform' }}
           TF_DEPLOYMENT: ${{ inputs.deployment || 'sentinel' }}
           TF_ENVIRONMENT: ${{ inputs.environment_name || 'plat' }}
+          EMPTY_STATE: ${{ steps.workspace.outputs.empty_state }}
         run: |
           {
+            if [ "${EMPTY_STATE}" = "true" ]; then
+              echo "> **Planned against an empty state.** The target workspace does not"
+              echo "> exist - the estate is currently destroyed - so every resource above"
+              echo "> reads as *to create*. That is the plan for building it from zero,"
+              echo "> not a diff against something running."
+              echo ""
+            fi
             echo "### Teardown contract"
             echo ""
             echo "After \`destroy\`, \`verify-estate.sh\` asserts against **Azure** — not"
