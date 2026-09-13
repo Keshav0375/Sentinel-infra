@@ -200,7 +200,9 @@ if [ "${MODE}" = "apply" ] && [ -n "${DEPLOYMENT}" ] && [ -n "${ENVIRONMENT}" ];
     drop_probe                 # clear a leak from a cancelled run, then arm the trap
     trap drop_probe EXIT
 
-    if probe_err="$(az appservice plan create                       --name "${probe_plan}" --resource-group "${probe_rg}"                       --location "${LOCATION}" --sku F1 --is-linux -o none 2>&1)"; then
+    if probe_err="$(az appservice plan create \
+                      --name "${probe_plan}" --resource-group "${probe_rg}" \
+                      --location "${LOCATION}" --sku F1 --is-linux -o none 2>&1)"; then
       pass "App Service F1 quota (probe created)"
     elif printf '%s' "${probe_err}" | grep -qi 'quota'; then
       fail "App Service F1 quota" "limit is 0 — raise it in Portal > Subscription > Usage + quotas (Microsoft.Web, ${LOCATION}), or set the App Service SKU to a paid tier"
