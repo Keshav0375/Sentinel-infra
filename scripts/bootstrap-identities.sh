@@ -144,6 +144,19 @@ ensure_fic() {
     -o none
 }
 
+# The counterpart to ensure_fic. A bootstrap script that only ever ADDS cannot
+# retire a subject: dropping the `ensure_fic` line stops a fresh tenant from
+# getting the credential and leaves every existing one in place, which is the
+# half of the change that does not matter. Converge, do not accumulate.
+remove_fic() {
+  local identity="$1" name="$2"
+  if ! az identity federated-credential show --name "${name}"          --identity-name "${identity}" --resource-group "${BOOTSTRAP_RG}" >/dev/null 2>&1; then
+    return
+  fi
+  echo "    removing fic ${name} (retired)"
+  az identity federated-credential delete --name "${name}"     --identity-name "${identity}" --resource-group "${BOOTSTRAP_RG}" --yes -o none
+}
+
 principal_of() {
   az identity show --name "$1" --resource-group "${BOOTSTRAP_RG}" --query principalId -o tsv | nocr
 }
@@ -171,8 +184,25 @@ ensure_role "${plan_pid}" "Storage Blob Data Reader" "${SA_SCOPE}"
 ensure_role "${plan_pid}" "Azure Kubernetes Service Cluster User Role" "${SUB_SCOPE}"
 ensure_role "${plan_pid}" "Azure Kubernetes Service RBAC Reader" "${SUB_SCOPE}"
 
-ensure_fic "gha-plan" "plan-pull-request" "repo:${GITHUB_OWNER}/${INFRA_REPO}:pull_request"
 ensure_fic "gha-plan" "plan-environment" "repo:${GITHUB_OWNER}/${INFRA_REPO}:environment:plan"
+
+# ── The `pull_request` subject is retired ─────────────────────────────────────
+# It was never presented. Every job that authenticates as gha-plan declares
+# `environment: plan` — run-preflight and run-plan in ci_infra_dry.yml, and
+# verify in ci_infra.yml — and declaring an environment REPLACES the subject
+# with `environment:<name>`. The branch/pull_request form is never sent, so this
+# credential authorised nothing that the estate uses.
+#
+# It was, however, the only subject a fork pull request could ever match, and
+# this repository is PUBLIC. gha-plan holds subscription-wide Reader plus
+# Storage Blob Data Reader on the state account, and Terraform state carries the
+# ACR admin password in plaintext (modules/acr sets admin_enabled = true). The
+# grant bought nothing and its worst case is a registry credential, so it goes.
+#
+# If a future job needs gha-plan WITHOUT an environment, give that job
+# `environment: plan` rather than restoring this — the environment is what makes
+# the subject unmintable from a pull_request event in the first place.
+remove_fic "gha-plan" "plan-pull-request"
 
 # ── gha-deploy — creates and destroys ─────────────────────────────────────────
 echo
