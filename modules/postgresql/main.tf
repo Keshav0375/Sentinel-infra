@@ -94,11 +94,49 @@ resource "azurerm_postgresql_flexible_server_active_directory_administrator" "ba
 }
 
 # ── Database ──────────────────────────────────────────────────────────────────
+#
+# ── Why this depends on the administrators, and why that is about DESTROY ─────
+# Nothing here needs an admin to exist in order to create a database — the ARM
+# control plane creates it. The dependency is declared for the order Terraform
+# derives from it in REVERSE: on destroy, dependents die first, so the databases
+# are dropped before the Entra principals that own them.
+#
+# Without it the two are independent, Terraform destroys them concurrently, and
+# the admin drop loses the race. Azure runs `DROP ROLE` inside Postgres, which
+# refuses:
+#
+#   AadAuthPrincipalDropFailed: Failed to drop Microsoft Entra principal.
+#   Reason: '2BP01: role "<upn>" cannot be dropped because some objects
+#   depend on it'
+#
+# 2BP01 is `dependent_objects_still_exist`. The admin created the database, so
+# it owns it, and a role that owns objects cannot be dropped.
+#
+# The consequence is worse than one failed resource. That delete leaves a Failed
+# terminal state on the server, every other server-scoped operation queues behind
+# it, and Terraform polls them for half an hour until the GitHub OIDC assertion
+# request times out —
+#
+#   githubAssertion: cannot request token: ... context deadline exceeded
+#
+# — an error that names neither Postgres nor the role. Seen live in run
+# 34779806599: 29m51s of "Still destroying", the server itself never attempted,
+# and rg-sentinel-plat-cc left standing and billing.
+#
+# A deployment's database (database.tf, `shared` mode) is owned by the same
+# admin and lives in a DIFFERENT workspace, so no Terraform edge can express it.
+# scripts/lifecycle.sh covers that case by destroying every deployment before
+# the platform, which is the same ordering property enforced one level up.
 resource "azurerm_postgresql_flexible_server_database" "sentinel" {
   name      = var.database_name
   server_id = azurerm_postgresql_flexible_server.sentinel.id
   charset   = "UTF8"
   collation = "en_US.utf8"
+
+  depends_on = [
+    azurerm_postgresql_flexible_server_active_directory_administrator.human,
+    azurerm_postgresql_flexible_server_active_directory_administrator.backend_uami,
+  ]
 }
 
 # pgvector must be allow-listed at the server before the backend can run
