@@ -436,14 +436,34 @@ jobs:
           SCOPE: ${{ inputs.scope }}
           DEPLOYMENT: ${{ inputs.deployment }}
           ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+          RUN_RESULT: ${{ needs.run.result }}
         run: |
           mode="applied"
           if [ "${ACTION}" = "destroy" ]; then mode="destroyed"; fi
+
+          # -- Advisory when the action itself already failed ----------------
+          # Verify still RUNS in that case -- a half-finished apply is exactly
+          # when you need to know what exists -- but it must not add a second
+          # red mark. On 2026-09-13 an `apply - deployment` died inside its
+          # plan having created nothing, and verify then reported
+          #     FAIL  rg-demo1-dev-cc does not exist
+          # as a hard error. That is a consequence presented as a cause, and it
+          # is the louder of the two, so it is the one the operator chases.
+          #
+          # Nothing is masked: `needs` already carries the run job's failure
+          # into the workflow's conclusion, so the workflow is red either way.
+          advisory=""
+          if [ "${RUN_RESULT}" != "success" ]; then
+            echo "the ${ACTION} failed - verifying in advisory mode"
+            advisory="--advisory"
+          fi
+
+          # shellcheck disable=SC2086  # advisory is one optional flag or empty
           bash ./scripts/verify-estate.sh \
             --mode "${mode}" \
             --scope "${SCOPE}" \
             --deployment "${DEPLOYMENT}" \
-            --environment "${ENVIRONMENT_NAME}"
+            --environment "${ENVIRONMENT_NAME}" ${advisory}
 
       - name: Summary
         if: always()
