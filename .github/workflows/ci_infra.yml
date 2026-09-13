@@ -43,6 +43,23 @@
 
 name: "Sentinel Infra — Deploy"
 
+# ── Why a run-name ───────────────────────────────────────────────────────────
+# Every dispatch of this workflow used to render in the Actions list as the
+# identical string "Sentinel Infra — Deploy", distinguished only by a run number
+# and a duration. Four runs on 2026-09-12 — two refused, two that emptied the
+# subscription — were indistinguishable at a glance, which is precisely the
+# history you need to read after a destroy.
+#
+# `run-name` is evaluated at DISPATCH time against the `inputs` context, so the
+# title is fixed before any job starts and survives a run that fails in its
+# first step. The scope decides what identifies the target: the platform layer
+# is a singleton, so naming a deployment beside it would be a lie.
+run-name: >-
+  Sentinel Infra - ${{ inputs.action }} for
+  ${{ inputs.scope == 'platform' && 'platform'
+  || inputs.scope == 'all' && format('all of platform and {0}-{1}', inputs.deployment, inputs.environment_name)
+  || format('deployment {0}-{1}', inputs.deployment, inputs.environment_name) }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -69,7 +86,7 @@ on:
         required: false
         default: dev
       confirm:
-        description: 'DESTROY ONLY — type the deployment name · or `platform` · or `destroy-everything` for scope all.'
+        description: 'DESTROY ONLY. Type what matches the scope: deployment -> the deployment name · platform -> platform · all -> destroy-everything'
         type: string
         required: false
         default: ''
@@ -105,6 +122,10 @@ jobs:
 
     outputs:
       vault: ${{ steps.vault.outputs.name }}
+      # Consumed by `verify`. Set only once the guards have let the run through,
+      # so a refusal is distinguishable from an attempt that failed — see the
+      # comment on the verify job.
+      guards_passed: ${{ steps.guards.outputs.passed }}
 
     steps:
       # ── Guards, BEFORE authenticating ────────────────────────────────────
@@ -113,6 +134,7 @@ jobs:
       # to be allowed. lifecycle.sh repeats these so a LOCAL run is guarded too;
       # this copy exists to fail in two seconds instead of ninety.
       - name: Check guards
+        id: guards
         env:
           ACTION: ${{ inputs.action }}
           SCOPE: ${{ inputs.scope }}
@@ -120,32 +142,67 @@ jobs:
           CONFIRM: ${{ inputs.confirm }}
           TARGET: ${{ inputs.target }}
         run: |
+          # A refusal has to be readable from the run PAGE, not from the log. On
+          # 2026-09-12 two dispatches died here on a mistyped `confirm`; the
+          # reason was six scrolls into a collapsed step while the run page
+          # showed a failure in a different job entirely. Everything below
+          # therefore writes the remedy to the step summary as well as the
+          # annotation.
+          note() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+
           if [ -n "${TARGET}" ] && [ "${ACTION}" != "plan" ]; then
+            note "### Refused — \`target\` is plan-only"
+            note ""
+            note "A partial apply or destroy leaves state that no full plan ever agreed"
+            note "with, which is how a half-destroyed deployment is made."
+            note ""
+            note "Re-dispatch with **action: plan**, or clear \`target\`."
             echo "::error::target is accepted only with action 'plan'."
-            echo "::error::A partial apply or destroy leaves state that no full plan ever"
-            echo "::error::agreed with — which is how a half-destroyed deployment is made."
             exit 1
           fi
 
           if [ "${ACTION}" != "destroy" ]; then
             echo "no destroy guards needed for ${ACTION}"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          # The fallback is a token nobody can type, not the empty string. With
+          # `expected=""` an unrecognised scope would be confirmed by the input's
+          # own default of '' — a gate that opens when its subject is unknown.
           case "${SCOPE}" in
             deployment) expected="${DEPLOYMENT}" ;;
             platform)   expected="platform" ;;
             all)        expected="destroy-everything" ;;
-            *)          expected="" ;;
+            *)          expected="__unrecognised-scope__" ;;
           esac
 
           if [ "${CONFIRM}" != "${expected}" ]; then
+            note "### Destroy refused — \`confirm\` does not match"
+            note ""
+            note "**Nothing was touched.** Azure was never authenticated."
+            note ""
+            note "| | |"
+            note "|---|---|"
+            note "| scope requested | \`${SCOPE}\` |"
+            note "| you typed | \`${CONFIRM}\` |"
+            note "| **type exactly** | \`${expected}\` |"
+            note ""
+            note "The token differs per scope deliberately — it names the blast radius,"
+            note "so a token memorised for one scope cannot fire a wider one:"
+            note ""
+            note "| scope | confirm |"
+            note "|---|---|"
+            note "| \`deployment\` | the deployment name — here \`${DEPLOYMENT}\` |"
+            note "| \`platform\` | \`platform\` |"
+            note "| \`all\` | \`destroy-everything\` |"
             echo "::error::confirm ('${CONFIRM}') does not match. Scope '${SCOPE}' requires exactly: ${expected}"
             echo "::error::Retype it. This is the only thing standing between a mis-click"
             echo "::error::and an irreversible action."
             exit 1
           fi
           echo "destroy confirmed for scope ${SCOPE}"
+          echo "passed=true" >> "$GITHUB_OUTPUT"
 
       - name: Check out
         uses: actions/checkout@v4
@@ -340,10 +397,25 @@ jobs:
   # `always()` because a run that failed HALFWAY is exactly when you most need to
   # know what survived. It cannot mask a failure — `needs` already carries the
   # run job's result into the workflow's own conclusion.
+  #
+  # ── But `always()` alone is wrong, and cost two hours on 2026-09-12 ────────
+  # A run REFUSED by the guards never touched Azure, yet verify ran anyway,
+  # asserted mode=destroyed, and reported `rg-sentinel-dev-cc still exists` —
+  # two red annotations describing a correct state, on top of the one real
+  # error. The operator read the loudest failure first and went looking for a
+  # stuck resource group that was never supposed to be gone.
+  #
+  # A verifier must only assert an outcome that was actually ATTEMPTED. The
+  # guard's output is that distinction: refused (no output) vs attempted-and-
+  # then-whatever-happened. A crash after the guards still verifies, which is
+  # the case `always()` exists for.
   verify:
     name: Verify against Azure
     needs: [run]
-    if: always() && inputs.action != 'plan'
+    if: >-
+      always()
+      && inputs.action != 'plan'
+      && needs.run.outputs.guards_passed == 'true'
     runs-on: ubuntu-latest
     environment: plan
 
