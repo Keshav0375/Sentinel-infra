@@ -22,7 +22,7 @@ name: "Sentinel — Pause / Resume"
 # `scope` is free text here — `platform`, `all`, or a deployment name — so it
 # goes into the title verbatim. This is the most frequently dispatched workflow
 # in the repo; an undifferentiated list of it is the least useful.
-run-name: "Sentinel · ${{ inputs.action }} · ${{ inputs.scope }}"
+run-name: "Sentinel - ${{ inputs.action }} for ${{ inputs.scope }}"
 
 on:
   workflow_dispatch:

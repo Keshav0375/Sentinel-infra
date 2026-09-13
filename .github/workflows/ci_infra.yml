@@ -55,10 +55,10 @@ name: "Sentinel Infra — Deploy"
 # first step. The scope decides what identifies the target: the platform layer
 # is a singleton, so naming a deployment beside it would be a lie.
 run-name: >-
-  Sentinel Infra · ${{ inputs.action }} ·
+  Sentinel Infra - ${{ inputs.action }} for
   ${{ inputs.scope == 'platform' && 'platform'
-  || inputs.scope == 'all' && format('all (platform + {0}-{1})', inputs.deployment, inputs.environment_name)
-  || format('{0}-{1}', inputs.deployment, inputs.environment_name) }}
+  || inputs.scope == 'all' && format('all of platform and {0}-{1}', inputs.deployment, inputs.environment_name)
+  || format('deployment {0}-{1}', inputs.deployment, inputs.environment_name) }}
 
 on:
   workflow_dispatch:

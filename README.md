@@ -202,9 +202,16 @@ auto-apply cannot survive multi-deployment: a push has no way to know *which* de
 means, and no identity carries a branch subject any more.
 
 **Every run names its target.** `run-name` is evaluated at dispatch time, so
-`Sentinel Infra · destroy · demo1-dev` is the title in the Actions list before a single job
-starts — and it survives a run that fails in its first step. Four identically-named runs is an
-unreadable audit trail precisely when you most need to read one.
+`Sentinel Infra - destroy for deployment demo1-dev` is the title in the Actions list before a
+single job starts — and it survives a run that fails in its first step. Four identically-named
+runs is an unreadable audit trail precisely when you most need to read one.
+
+| dispatch | run title |
+|---|---|
+| `apply` · `deployment` · `demo1` · `dev` | `Sentinel Infra - apply for deployment demo1-dev` |
+| `destroy` · `platform` | `Sentinel Infra - destroy for platform` |
+| `plan` · `all` · `demo1` · `dev` | `Sentinel Infra - plan for all of platform and demo1-dev` |
+| Pause/Resume · `pause` · `platform` | `Sentinel - pause for platform` |
 
 ### What a Deploy run actually does
 

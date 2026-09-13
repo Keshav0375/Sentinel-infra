@@ -33,11 +33,11 @@ name: "Sentinel Infra — Validate & Plan"
 # twenty-line message as a run title. The subject is already in the run header.
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
-  && format('Sentinel Infra · plan · {0}', inputs.layer == 'platform' && 'platform'
-  || format('{0}-{1}', inputs.deployment, inputs.environment_name))
+  && format('Sentinel Infra - plan for {0}', inputs.layer == 'platform' && 'platform'
+  || format('deployment {0}-{1}', inputs.deployment, inputs.environment_name))
   || github.event_name == 'pull_request'
-  && format('Sentinel Infra · validate · PR #{0} — {1}', github.event.number, github.event.pull_request.title)
-  || format('Sentinel Infra · validate · {0}', github.ref_name) }}
+  && format('Sentinel Infra - validate for PR #{0}', github.event.number)
+  || format('Sentinel Infra - validate for {0}', github.ref_name) }}
 
 on:
   push:
