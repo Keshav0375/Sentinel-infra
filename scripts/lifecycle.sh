@@ -283,7 +283,13 @@ case "${SCOPE}:${ACTION}" in
   # money, which is the opposite of what a teardown path is for.
   deployment:plan|deployment:apply)
     if [ "$(platform_is_applied)" = "no" ]; then
-      echo "::error::the platform has not been applied, so this deployment cannot be ${ACTION}ed." >&2
+      # "${ACTION}ed" reads "applyed" / "planed". Name the verb, do not inflect it.
+      case "${ACTION}" in
+        apply) verb="applied" ;;
+        plan)  verb="planned" ;;
+        *)     verb="${ACTION}" ;;
+      esac
+      echo "::error::the platform has not been applied, so this deployment cannot be ${verb}." >&2
       echo "::error::deployment.tf reads the cluster name, OIDC issuer and Postgres FQDN from" >&2
       echo "::error::the platform's terraform_remote_state. Those are OUTPUTS — they do not" >&2
       echo "::error::exist until the platform has been applied, so there is nothing to build" >&2
