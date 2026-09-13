@@ -229,6 +229,93 @@ jobs:
       # The checks a plan structurally cannot make. Here rather than in the PR
       # preflight because name availability is a POST */action that the plan
       # identity cannot perform.
+      - name: Initialize
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+        run: terraform init -input=false
+
+      # ── Who may write secrets into the vault ─────────────────────────────
+      # Resolved live rather than stored as a repository variable, because the
+      # identity is recreated by bootstrap-identities.sh and a stale GUID in a
+      # variable would fail as a silent no-grant that surfaces only at seed
+      # time. Empty is tolerated: modules/keyvault skips the grant and the seed
+      # step explains why it cannot write.
+      # -- The dependency check, BEFORE the expensive ones --------------------
+      # A deployment reads the cluster name, OIDC issuer URL and Postgres FQDN
+      # from the platform's `terraform_remote_state`. If the platform has never
+      # been applied those outputs do not exist and NOTHING downstream can
+      # succeed -- so asking about it first is free information.
+      #
+      # lifecycle.sh makes the same check and is the authority; this copy exists
+      # for the same reason the guard step does, to fail in seconds rather than
+      # at the end of a queue of expensive steps. On 2026-09-13 the check lived
+      # only in lifecycle.sh, which runs last: the refusal was correct but
+      # arrived 2m35s in, after Preflight had run its whole battery -- including
+      # the F1 probe, which CREATES and deletes an App Service plan -- to
+      # qualify a deployment that could never be built.
+      #
+      # `terraform init` moved above Preflight to make this possible. Preflight
+      # uses only `az` and needs no Terraform state, so the order costs nothing.
+      - name: Check the platform exists
+        if: inputs.scope == 'deployment' && inputs.action != 'destroy'
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        run: |
+          count=0
+          if terraform workspace select platform >/dev/null 2>&1; then
+            count="$(terraform state list 2>/dev/null | grep -c . || true)"
+          fi
+          terraform workspace select default >/dev/null 2>&1 || true
+
+          if [ "${count}" -gt 0 ]; then
+            echo "platform: ${count} resources in state"
+            exit 0
+          fi
+
+          {
+            echo "## :no_entry: The platform does not exist yet"
+            echo ""
+            echo "**Nothing was created, and nothing was charged.**"
+            echo ""
+            echo "\`${DEPLOYMENT}-${ENVIRONMENT_NAME}\` reads the AKS cluster name, the OIDC issuer"
+            echo "URL and the Postgres FQDN from the platform layer's \`terraform_remote_state\`."
+            echo "Those are **outputs** -- they do not exist until the platform has been"
+            echo "applied, so there is nothing for this deployment to build against."
+            echo ""
+            echo "### Run this first"
+            echo ""
+            echo "**Actions -> Sentinel Infra -- Deploy -> Run workflow**"
+            echo ""
+            echo "| input | value |"
+            echo "|---|---|"
+            echo "| action | \`apply\` |"
+            echo "| scope | **\`platform\`** |"
+            echo "| environment_name | **\`plat\`** |"
+            echo "| confirm | _leave empty_ |"
+            echo ""
+            echo "It builds ACR, one AKS cluster and the shared Postgres server -- about"
+            echo "15-20 minutes, most of it AKS. Approve the \`production\` gate when it"
+            echo "pauses. Then re-run this deployment."
+            echo ""
+            echo "### Or do both in one run"
+            echo ""
+            echo "Dispatch with \`action: apply\` and \`scope: all\`. It applies the platform"
+            echo "first and this deployment second, in dependency order."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::error::The platform has not been applied, so \`${DEPLOYMENT}-${ENVIRONMENT_NAME}\` cannot be built."
+          echo "::error::Run this workflow with action=apply scope=platform environment_name=plat first,"
+          echo "::error::or re-dispatch with scope=all to do both in order. See the run summary."
+          exit 1
+
       - name: Preflight
         if: inputs.action == 'apply'
         env:
@@ -275,20 +362,6 @@ jobs:
             fi
           done <<< "$(az aks list --query "[].[name,resourceGroup]" -o tsv)"
 
-      - name: Initialize
-        env:
-          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
-          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          ARM_USE_OIDC: "true"
-        run: terraform init -input=false
-
-      # ── Who may write secrets into the vault ─────────────────────────────
-      # Resolved live rather than stored as a repository variable, because the
-      # identity is recreated by bootstrap-identities.sh and a stale GUID in a
-      # variable would fail as a silent no-grant that surfaces only at seed
-      # time. Empty is tolerated: modules/keyvault skips the grant and the seed
-      # step explains why it cannot write.
       - name: Resolve the seeder principal
         id: seeder
         run: |
