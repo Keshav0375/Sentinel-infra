@@ -23,6 +23,18 @@
 
 name: "Sentinel Infra — Validate & Plan"
 
+# This workflow answers to three events, so the title has to say which one it
+# was: a dispatched plan of `demo1-dev` and a PR validation are different
+# questions and used to carry the same name in the Actions list. Each branch
+# names the thing that actually identifies the run.
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+  && format('Sentinel Infra · plan · {0}', inputs.layer == 'platform' && 'platform'
+  || format('{0}-{1}', inputs.deployment, inputs.environment_name))
+  || github.event_name == 'pull_request'
+  && format('Sentinel Infra · validate · PR #{0} — {1}', github.event.number, github.event.pull_request.title)
+  || format('Sentinel Infra · validate · {0} — {1}', github.ref_name, github.event.head_commit.message) }}
+
 on:
   push:
     branches: ['**']

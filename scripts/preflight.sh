@@ -13,6 +13,8 @@
 #   name availability `sentineltfstate` was already taken by another tenant
 #   soft-deleted vault a destroyed vault holds its name for 7 days
 #   postgres state   `400 ServerStoppedError` broke a run three times
+#   App Service F1   `Current Limit (F1 VMs): 0` killed an apply 14 minutes in,
+#                    after the whole platform had already been built
 #
 # ── Two modes, because the identities differ ─────────────────────────────────
 # `plan`  runs under gha-plan (Reader). It gets the checks Reader can perform.
@@ -156,6 +158,63 @@ if [ "${MODE}" = "apply" ] && [ -n "${DEPLOYMENT}" ] && [ -n "${ENVIRONMENT}" ];
     pass "storage account name free (${st})"
   else
     fail "storage account name free (${st})" "another tenant holds it — change the deployment name"
+  fi
+
+  # ── App Service F1 quota, by live probe ───────────────────────────────────
+  # On 2026-08-30 an apply ran for fourteen minutes, built the entire platform,
+  # and then died on:
+  #
+  #   creating App Service Plan ... 401 Unauthorized
+  #   "Operation cannot be completed without additional quota.
+  #    Current Limit (F1 VMs): 0  Current Usage: 0  Amount required: 1"
+  #
+  # This is a quota refusal wearing a 401, and nothing above catches it: the
+  # vCPU check reads Microsoft.Compute cores, and F1 is a Microsoft.Web counter
+  # that shares none of that budget.
+  #
+  # There is no read-only way to ask. Three were tried and all three lie:
+  #   Microsoft.Web/locations/<loc>/usages      -> 501 MethodNotAllowed
+  #   Microsoft.Web/.../validate (serverfarms)  -> {"status":"Success"} at limit 0
+  #   az appservice list-locations --sku F1     -> lists the region regardless
+  #
+  # So the check is the operation. Create a Free plan, read the answer, delete
+  # it. It costs ~20 seconds against fourteen minutes and a half-built estate,
+  # and F1 is free, so a probe that briefly exists is billed nothing.
+  #
+  # ── The probe's own failure mode, and the mitigation ──────────────────────
+  # A leaked probe would consume the single F1 slot it exists to protect —
+  # turning the check into the outage. Two defences: the name is FIXED, not
+  # random, so a leak is findable and self-healing (the next run deletes it
+  # before creating); and the delete also runs from an EXIT trap, so a runner
+  # cancellation still cleans up. Apply-mode only — gha-plan holds no write
+  # action and would fail this on RBAC rather than on quota, which would be a
+  # false alarm of exactly the kind this file is trying to end.
+  probe_rg="rg-sentinel-bootstrap"
+  probe_plan="asp-sentinel-preflight-probe"
+
+  drop_probe() {
+    az appservice plan delete -n "${probe_plan}" -g "${probe_rg}" --yes -o none 2>/dev/null || true
+  }
+
+  if az group show -n "${probe_rg}" -o none 2>/dev/null; then
+    drop_probe                 # clear a leak from a cancelled run, then arm the trap
+    trap drop_probe EXIT
+
+    if probe_err="$(az appservice plan create                       --name "${probe_plan}" --resource-group "${probe_rg}"                       --location "${LOCATION}" --sku F1 --is-linux -o none 2>&1)"; then
+      pass "App Service F1 quota (probe created)"
+    elif printf '%s' "${probe_err}" | grep -qi 'quota'; then
+      fail "App Service F1 quota" "limit is 0 — raise it in Portal > Subscription > Usage + quotas (Microsoft.Web, ${LOCATION}), or set the App Service SKU to a paid tier"
+    else
+      # Not a quota answer. Report it rather than guessing — a probe that
+      # reinterprets an unrelated error is worse than no probe.
+      warn "App Service F1 quota" "probe inconclusive: $(printf '%s' "${probe_err}" | tr '
+' ' ' | cut -c1-140)"
+    fi
+
+    drop_probe
+    trap - EXIT
+  else
+    warn "App Service F1 quota" "no ${probe_rg} to probe in — skipped"
   fi
 fi
 

@@ -31,6 +31,12 @@
 
 name: "Runner Image — Build & Deploy to ACR"
 
+# The image is identified by the commit it was built from, so the run says so.
+# A dispatch that also applies an alias tag names the alias — that is the whole
+# reason someone dispatched it by hand.
+run-name: >-
+  Runner Image · sha-${{ github.sha }}${{ inputs.extra_tag && format(' + {0}', inputs.extra_tag) }}
+
 on:
   push:
     branches: [main]
