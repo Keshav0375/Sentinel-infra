@@ -133,6 +133,23 @@ jobs:
       # azure/login would mean a token was minted for a run that was never going
       # to be allowed. lifecycle.sh repeats these so a LOCAL run is guarded too;
       # this copy exists to fail in two seconds instead of ninety.
+      # -- Redact the administrator's UPN from this public log ---------------
+      # `vars.*` are not masked. `TF_PG_ADMIN_PRINCIPAL_NAME: <upn>` was
+      # therefore printed in the env block of every run, in a PUBLIC repository.
+      # It is not a credential and cannot authenticate anything -- but it is a
+      # real person's university account published beside the tenant it
+      # administers, which is the pair that targets password-spray and consent
+      # phishing. `add-mask` redacts it for the rest of the job, so this costs
+      # no migration of the variable to a secret.
+      #
+      # First step in the job: a mask only applies to output produced AFTER it
+      # is registered, and the runner prints a step's env block as that step
+      # starts.
+      - name: Mask the administrator UPN
+        env:
+          UPN: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
+        run: '[ -z "${UPN}" ] || echo "::add-mask::${UPN}"'
+
       - name: Check guards
         id: guards
         env:
