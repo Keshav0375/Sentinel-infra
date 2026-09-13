@@ -35,6 +35,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
+ADVISORY=0
 MODE=""
 SCOPE=""
 DEPLOYMENT=""
@@ -52,6 +53,11 @@ while [ $# -gt 0 ]; do
     --scope)       SCOPE="$2"; shift 2 ;;
     --deployment)  DEPLOYMENT="$2"; shift 2 ;;
     --environment) ENVIRONMENT="$2"; shift 2 ;;
+    # Report the findings, do not set the exit code. For a run whose ACTION
+    # already failed: the workflow is red on that job's own result, the cause is
+    # in that job's log, and a second red here describes a consequence as if it
+    # were a cause. See the caller in .github/workflows/ci_infra.yml.
+    --advisory)    ADVISORY=1; shift ;;
     -h|--help)     sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -223,6 +229,13 @@ fi
 
 echo
 if [ "${failures}" -ne 0 ]; then
+  if [ "${ADVISORY}" -eq 1 ]; then
+    echo "::warning::verify-estate found ${failures} problem(s), reported but not failed."
+    echo "The action itself already failed — this is the damage report for it, not"
+    echo "a separate fault. Read the action's job for the cause, then re-run it;"
+    echo "the same action is safe and idempotent."
+    exit 0
+  fi
   echo "::error::verify-estate found ${failures} problem(s). The run is NOT clean."
   echo "Re-running the same action is safe and idempotent; do that before"
   echo "investigating by hand."

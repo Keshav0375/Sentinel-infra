@@ -264,13 +264,50 @@ case "${SCOPE}:${ACTION}" in
     run_layer platform sentinel plat
     ;;
 
-  deployment:plan)
+  # ── A deployment cannot be planned OR applied before the platform ──────────
+  # `plan` was guarded here on 2026-08-30 and `apply` was not, which left the
+  # more expensive half of the pair unprotected: on 2026-09-13 an
+  # `apply --scope deployment` against an unbuilt platform spent two minutes on
+  # preflight, waking nothing, and a terraform init before dying inside the plan
+  # with three separate provider errors —
+  #   `local.platform is object with no attributes`
+  # — none of which name the actual cause. The preconditions in deployment.tf
+  # DID fire and their messages are correct, but they fire deep in a plan, after
+  # the cost has been paid, and they arrive three at a time.
+  #
+  # Guarding here instead fails in seconds with one sentence. Both verbs read the
+  # same outputs from the same remote state, so both need the same precondition.
+  #
+  # `destroy` is deliberately NOT guarded: refusing to tear a deployment down
+  # because its dependency is already gone would strand resources that cost
+  # money, which is the opposite of what a teardown path is for.
+  deployment:plan|deployment:apply)
     if [ "$(platform_is_applied)" = "no" ]; then
-      echo "::error::the platform has not been applied, so this deployment cannot be planned." >&2
+      echo "::error::the platform has not been applied, so this deployment cannot be ${ACTION}ed." >&2
       echo "::error::deployment.tf reads the cluster name, OIDC issuer and Postgres FQDN from" >&2
       echo "::error::the platform's terraform_remote_state. Those are OUTPUTS — they do not" >&2
-      echo "::error::exist until the platform has been applied, so there is nothing to plan" >&2
+      echo "::error::exist until the platform has been applied, so there is nothing to build" >&2
       echo "::error::against. Run apply with scope 'platform' (or scope 'all') first." >&2
+      if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        {
+          echo "### Refused — the platform does not exist yet"
+          echo ""
+          echo "**Nothing was created.** \`${DEPLOYMENT}-${ENVIRONMENT}\` reads the cluster name,"
+          echo "OIDC issuer URL and Postgres FQDN from the platform's \`terraform_remote_state\`."
+          echo "Those are *outputs*: they do not exist until the platform layer has been applied."
+          echo ""
+          echo "Run **Sentinel Infra — Deploy** with:"
+          echo ""
+          echo "| input | value |"
+          echo "|---|---|"
+          echo "| action | \`apply\` |"
+          echo "| scope | \`platform\` |"
+          echo "| environment_name | \`plat\` |"
+          echo ""
+          echo "Then re-run this deployment. Or use \`scope: all\`, which applies the"
+          echo "platform first and the deployment second, in one run."
+        } >> "$GITHUB_STEP_SUMMARY"
+      fi
       exit 1
     fi
     run_layer deployment "${DEPLOYMENT}" "${ENVIRONMENT}"
