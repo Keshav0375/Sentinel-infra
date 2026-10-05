@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # App Service — the TARGET app (architecture/infra.md §3.6).
 #
-# Hosts dummy-api-0375, the deliberately-breakable FastAPI app from the
+# Hosts sentinel-watchtower, the deliberately-breakable FastAPI app from the
 # Sentinel-deployment repo. Its deploys and failures are what generate the real
 # Datadog signal the whole incident pipeline runs on. Terraform provisions the
 # plan + empty web app; code arrives via ci_app_deployment.yml (deployment
@@ -26,6 +26,9 @@ resource "azurerm_service_plan" "deployment" {
   sku_name            = "F1" # always-free tier: 60 CPU-min/day, 1 GB — the real ceiling for the 30-scenario runs
 }
 
+# The `dummy_api` address is historical: renaming it would destroy and recreate
+# the web app in every deployment's state for a cosmetic gain. The app it hosts
+# is sentinel-watchtower; the resource is named from var.app_name.
 resource "azurerm_linux_web_app" "dummy_api" {
   name                = var.app_name
   location            = var.location
@@ -49,7 +52,7 @@ resource "azurerm_linux_web_app" "dummy_api" {
 
   app_settings = {
     "APP_VERSION"                    = "initial"
-    "DD_SERVICE"                     = "dummy-api-0375"
+    "DD_SERVICE"                     = "sentinel-watchtower" # logical service name (decision 2026-10-04 D1), NOT the resource name
     "DD_ENV"                         = "dev"
     "SCM_DO_BUILD_DURING_DEPLOYMENT" = "true" # Oryx builds requirements.txt on zip deploy
   }
