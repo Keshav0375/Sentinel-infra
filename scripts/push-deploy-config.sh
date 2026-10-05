@@ -160,8 +160,9 @@ tf_output() {
   v_PG_HOST="$(tf_output database_host)"
   v_PG_DATABASE="$(tf_output database_name)"
   v_PG_USER="${APP_IDENTITY}"
-  dd_site="$(env_get "${ENV_FILE}" DD_SITE)"
-  v_DD_SITE="${dd_site:-datadoghq.com}"
+  # No default. The org is on US5 (us5.datadoghq.com); a fallback to US1 would
+  # push a site where every API call 403s, far from the cause. Missing refuses.
+  v_DD_SITE="$(env_get "${ENV_FILE}" DD_SITE)"
 }
 
 SECRET_ORDER=(AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID DD_API_KEY)
@@ -179,6 +180,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
   echo >&2
   echo "  AZURE_CLIENT_ID          run scripts/bootstrap-identities.sh (creates gha-app)" >&2
   echo "  DD_API_KEY               set it in ${ENV_FILE}" >&2
+  echo "  DD_SITE                  set it in ${ENV_FILE} (us5.datadoghq.com — the org is US5)" >&2
   echo "  AZURE_RG, APP_NAME, ...  apply workspace ${workspace} with the app_service and" >&2
   echo "                           database components, and run \`terraform init\` here" >&2
   exit 1
