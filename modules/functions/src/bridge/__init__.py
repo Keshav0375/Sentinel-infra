@@ -20,6 +20,10 @@ import uuid
 
 import azure.functions as func
 
+# A named logger rather than the root one: it still propagates to the root
+# handler the Functions worker installs, and the record carries its origin.
+log = logging.getLogger(__name__)
+
 
 def _tags_blob(data: dict) -> str:
     """Normalize Datadog's tags to one searchable string.
@@ -79,4 +83,4 @@ def main(event: func.EventGridEvent) -> None:
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         # 204 is the documented success for repository_dispatch.
-        logging.info("bridge: %s dispatched (HTTP %s)", signal_type, resp.status)
+        log.info("bridge: %s dispatched (HTTP %s)", signal_type, resp.status)
