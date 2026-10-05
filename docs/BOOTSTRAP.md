@@ -354,6 +354,16 @@ and that repo's branches are broken on purpose. GitHub rejects a job from any ot
 before it starts, so no token is ever minted for it. Re-running the script restores the
 policy if someone loosens it by hand.
 
+**`main` on Sentinel-deployment is protected by the same script.** The environment rule only
+gates *merges* if nothing reaches `main` except through a pull request. Otherwise "only a run
+on main can deploy" just means "anyone who can push can deploy". The script requires a pull
+request before merging (0 approvals, because you are the sole author and cannot approve your
+own PR) and forbids force pushes and deletion. It does not enforce the rules on admins, so you
+can still repair a broken `main`. It sets no required status check yet: deployment phase 2
+adds `Deploy` together with the workflow that reports it. When the script re-applies
+protection, it resends any checks that already exist, so a re-run never drops `Deploy`. The
+existing reviewers and wait timer on `sentinel-dev` are also kept.
+
 ---
 
 ## Day 2 — stopping and starting

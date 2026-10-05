@@ -15,6 +15,11 @@
 # The environment is restricted to the `main` branch (custom deployment branch
 # policy, exactly `main`), so ONLY A WORKFLOW RUN ON MAIN can enter it and mint
 # gha-app's token. A scenario branch can run a workflow; it cannot deploy.
+# That is a merge gate only if main itself takes no direct pushes, so `main`
+# on Sentinel-deployment is also protected here: a pull request is required
+# (0 approvals, sole author), with no force pushes, no deletion, and admins
+# not enforced so the owner can recover. Deployment phase 2 adds the required
+# `Deploy` status check, together with the workflow that reports it.
 #
 #   secrets    AZURE_CLIENT_ID (gha-app), AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
 #              DD_API_KEY
@@ -271,6 +276,74 @@ else
     gh api -X DELETE "${env_api}/deployment-branch-policies/${p%% *}" >/dev/null
     echo "  removed     branch policy ${p#* }"
   done
+fi
+
+# ── Branch protection on main ────────────────────────────────────────────────
+# The environment's main-only policy is a MERGE gate only if nothing reaches
+# main without a pull request; if a direct push to main were allowed, "only a
+# run on main can deploy" would mean "anyone who can push can deploy". So main
+# requires a PR (0 approvals: Keshav is the sole author and cannot approve his
+# own PR), with no force pushes and no deletion. enforce_admins stays false
+# so the owner can still recover a broken main by hand.
+#
+# No required status checks yet: the deploy workflow does not exist until
+# deployment phase 2, which adds the `Deploy` check. A check that is required
+# but never reported blocks every merge, so it is added with the workflow, not
+# before. Any checks already required are RESENT below, because this PUT also
+# replaces the whole protection and a re-run must not drop phase 2's check.
+prot_api="repos/${REPO}/branches/main/protection"
+PROT_OK_JQ='(.required_pull_request_reviews != null)
+  and (.required_pull_request_reviews.required_approving_review_count == 0)
+  and (.enforce_admins.enabled == false)
+  and (.allow_force_pushes.enabled == false)
+  and (.allow_deletions.enabled == false)'
+PROT_BODY_JQ='{
+  required_status_checks: (if .required_status_checks == null then null else {
+      strict: .required_status_checks.strict,
+      checks: [.required_status_checks.checks[]?
+               | {context: .context} + (if .app_id then {app_id: .app_id} else {} end)]
+    } end),
+  enforce_admins: false,
+  required_pull_request_reviews: {
+    required_approving_review_count: 0,
+    dismiss_stale_reviews: (.required_pull_request_reviews.dismiss_stale_reviews // false),
+    require_code_owner_reviews: (.required_pull_request_reviews.require_code_owner_reviews // false)
+  },
+  restrictions: null,
+  allow_force_pushes: false,
+  allow_deletions: false,
+  required_linear_history: (.required_linear_history.enabled // false),
+  required_conversation_resolution: (.required_conversation_resolution.enabled // false)
+} | tojson'
+prot_body='{"required_status_checks":null,"enforce_admins":false,"required_pull_request_reviews":{"required_approving_review_count":0},"restrictions":null,"allow_force_pushes":false,"allow_deletions":false}'
+
+prot_state=unknown       # unprotected | drifted | ok
+if [ "${have_gh}" -eq 1 ]; then
+  # 404 "Branch not protected" is the expected answer on a fresh repo.
+  if prot_ok="$(gh api "${prot_api}" --jq "${PROT_OK_JQ}" 2>/dev/null)"; then
+    if [ "${prot_ok}" = "true" ]; then
+      prot_state=ok
+    else
+      prot_state=drifted
+      prot_body="$(gh api "${prot_api}" --jq "${PROT_BODY_JQ}")"
+    fi
+  else
+    prot_state=unprotected
+  fi
+fi
+
+if [ "${DRY_RUN}" -eq 1 ]; then
+  case "${prot_state}" in
+    ok)          echo "  main is protected (PR required, no force push, no deletion)" ;;
+    drifted)     echo "  would align main's protection: PR required (0 approvals), no force push, no deletion" ;;
+    unprotected) echo "  would protect main: PR required (0 approvals), no force push, no deletion" ;;
+    *)           echo "  would protect main if needed (gh unavailable, not checked)" ;;
+  esac
+elif [ "${prot_state}" = "ok" ]; then
+  echo "  main is protected (PR required, no force push, no deletion)"
+else
+  printf '%s' "${prot_body}" | gh api -X PUT "${prot_api}" --input - >/dev/null
+  echo "  protected   main: PR required (0 approvals), no force push, no deletion"
 fi
 
 # ── Secrets, by stdin ─────────────────────────────────────────────────────────
