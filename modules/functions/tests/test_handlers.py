@@ -130,6 +130,26 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(req.full_url, "https://api.github.com/repos/Keshav0375/Sentinel/dispatches")
         self.assertEqual(req.get_header("Authorization"), "token test-token")
 
+    def test_flat_datadog_body_as_custom_schema_data(self):
+        # The topic takes Datadog's FLAT webhook body under CustomEventSchema and
+        # re-delivers it as EventGridSchema with the whole body as `data`
+        # (decision 2026-10-05). This is exactly what get_json() returns then.
+        data = {
+            "title": "[Triggered] sentinel-watchtower deploy failed",
+            "tags": "deploy_status:failed,service:sentinel-watchtower,env:dev",
+            "alert_transition": "Triggered",
+            "link": "https://us5.datadoghq.com/monitors/123",
+            "alert_id": "123",
+            "date": "1791158400000",
+        }
+        _, body = self._run(data)
+        cp = body["client_payload"]
+        self.assertEqual(cp["signal_type"], "deploy_failure")
+        self.assertEqual(cp["event"], data, "flat body forwarded unchanged")
+        _, body = self._run(data | {"tags": "service:sentinel-watchtower,env:dev",
+                                    "title": "[Triggered] 5xx rate high"})
+        self.assertEqual(body["client_payload"]["signal_type"], "runtime_error")
+
     def test_empty_event_still_dispatches_runtime_error(self):
         _, body = self._run({})
         self.assertEqual(body["client_payload"]["signal_type"], "runtime_error")

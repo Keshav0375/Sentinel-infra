@@ -18,8 +18,10 @@
 # That is a merge gate only if main itself takes no direct pushes, so `main`
 # on Sentinel-deployment is also protected here: a pull request is required
 # (0 approvals, sole author), with no force pushes, no deletion, and admins
-# not enforced so the owner can recover. Deployment phase 2 adds the required
-# `Deploy` status check, together with the workflow that reports it.
+# not enforced so the owner can recover. There is NO required status check,
+# by decision (2026-10-05): the deploy workflow runs only after a merge, so it
+# can never report on a PR, and the deliberately broken scenario branches must
+# stay mergeable.
 #
 #   secrets    AZURE_CLIENT_ID (gha-app), AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
 #              DD_API_KEY
@@ -160,8 +162,9 @@ tf_output() {
   v_PG_HOST="$(tf_output database_host)"
   v_PG_DATABASE="$(tf_output database_name)"
   v_PG_USER="${APP_IDENTITY}"
-  dd_site="$(env_get "${ENV_FILE}" DD_SITE)"
-  v_DD_SITE="${dd_site:-datadoghq.com}"
+  # No default. The org is on US5 (us5.datadoghq.com); a fallback to US1 would
+  # push a site where every API call 403s, far from the cause. Missing refuses.
+  v_DD_SITE="$(env_get "${ENV_FILE}" DD_SITE)"
 }
 
 SECRET_ORDER=(AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID DD_API_KEY)
@@ -179,6 +182,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
   echo >&2
   echo "  AZURE_CLIENT_ID          run scripts/bootstrap-identities.sh (creates gha-app)" >&2
   echo "  DD_API_KEY               set it in ${ENV_FILE}" >&2
+  echo "  DD_SITE                  set it in ${ENV_FILE} (us5.datadoghq.com — the org is US5)" >&2
   echo "  AZURE_RG, APP_NAME, ...  apply workspace ${workspace} with the app_service and" >&2
   echo "                           database components, and run \`terraform init\` here" >&2
   exit 1
@@ -307,11 +311,13 @@ fi
 # own PR), with no force pushes and no deletion. enforce_admins stays false
 # so the owner can still recover a broken main by hand.
 #
-# No required status checks yet: the deploy workflow does not exist until
-# deployment phase 2, which adds the `Deploy` check. A check that is required
-# but never reported blocks every merge, so it is added with the workflow, not
-# before. Any checks already required are RESENT below, because this PUT also
-# replaces the whole protection and a re-run must not drop phase 2's check.
+# No required status checks, and none are planned (decision 2026-10-05). The
+# deploy workflow runs on push to main, AFTER the merge, so it never reports on
+# a PR; requiring it would block every merge. And a check that did gate PRs
+# would refuse the deployfail/* scenario branches, which are broken on purpose
+# and must merge. Any checks already required (added by hand) are still RESENT
+# below, because this PUT replaces the whole protection and a re-run must not
+# silently drop them.
 prot_api="repos/${REPO}/branches/main/protection"
 PROT_OK_JQ='(.required_pull_request_reviews != null)
   and (.required_pull_request_reviews.required_approving_review_count == 0)

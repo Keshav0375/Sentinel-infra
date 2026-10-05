@@ -156,3 +156,20 @@ output "database_host" {
     null,
   )
 }
+
+# ── What the Datadog webhook needs (decision 2026-10-05 "Deploy phase 2") ────
+# Not secret. The topic KEY is deliberately absent: it would land in every
+# consumer's output, so apply.sh reads it live with `az eventgrid topic key
+# list --name <event_grid_topic_name> -g <deployment_resource_group>`.
+
+# Consumed by: Sentinel-deployment datadog/apply.sh (the topic-key lookup).
+output "event_grid_topic_name" {
+  description = "This deployment's Event Grid topic — the Datadog webhook's target."
+  value       = try(module.event_grid[0].topic_name, null)
+}
+
+# Consumed by: Sentinel-deployment datadog/apply.sh (the webhook URL).
+output "event_grid_endpoint" {
+  description = "Ingest URL of this deployment's Event Grid topic; the Datadog webhook posts here."
+  value       = try(module.event_grid[0].topic_endpoint, null)
+}

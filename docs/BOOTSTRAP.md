@@ -359,10 +359,11 @@ gates *merges* if nothing reaches `main` except through a pull request. Otherwis
 on main can deploy" just means "anyone who can push can deploy". The script requires a pull
 request before merging (0 approvals, because you are the sole author and cannot approve your
 own PR) and forbids force pushes and deletion. It does not enforce the rules on admins, so you
-can still repair a broken `main`. It sets no required status check yet: deployment phase 2
-adds `Deploy` together with the workflow that reports it. When the script re-applies
-protection, it resends any checks that already exist, so a re-run never drops `Deploy`. The
-existing reviewers and wait timer on `sentinel-dev` are also kept.
+can still repair a broken `main`. It sets **no required status check**, by decision
+(2026-10-05). The deploy workflow runs only after a merge, so it can never report on a PR.
+The `deployfail/*` scenario branches are broken on purpose and must stay mergeable. If you add
+a check by hand, the script resends it when it re-applies protection, so a re-run never drops
+it. The existing reviewers and wait timer on `sentinel-dev` are also kept.
 
 ---
 
