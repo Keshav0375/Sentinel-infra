@@ -41,6 +41,16 @@ resource "azurerm_linux_web_app" "dummy_api" {
   # basic authentication for deployment"), authorised by gha-app's Website
   # Contributor grant. With basic auth on, anyone holding the publish profile
   # could deploy around that grant, and around the main-only environment.
+  #
+  # ACCEPTED, recorded (PR #16 review): Website Contributor includes
+  # Microsoft.Web/sites/basicPublishingCredentialsPolicies/write, so a stolen
+  # gha-app token could turn basic auth back on. Accepted because:
+  #   - the token can only be minted by a workflow run on main (sentinel-dev's
+  #     main-only branch policy, plus main's PR-required protection);
+  #   - the next apply reverts the drift, since these two flags are managed here;
+  #   - a custom role without that action needs a role definition, which only
+  #     an Owner can create, and the pipeline identities hold no Owner.
+  # Revisit if gha-app is ever granted on a second deployment.
   ftp_publish_basic_authentication_enabled       = false
   webdeploy_publish_basic_authentication_enabled = false
 
