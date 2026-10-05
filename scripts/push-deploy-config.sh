@@ -200,7 +200,23 @@ echo
 env_api="repos/${REPO}/environments/${GH_ENVIRONMENT}"
 WANT_POLICY='{"protected_branches":false,"custom_branch_policies":true}'
 
+# The environment PUT REPLACES its protection rules: a field left out is
+# cleared, so a bare {deployment_branch_policy} would silently drop required
+# reviewers and the wait timer. The body is therefore built from the current
+# environment, resending what is there and changing only the branch policy.
+# (can_admins_bypass is tested for null rather than with `//`, which would
+# turn an explicit false into true.)
+ENV_BODY_JQ='{
+  wait_timer: ([.protection_rules[]? | select(.type == "wait_timer") | .wait_timer][0] // 0),
+  prevent_self_review: ([.protection_rules[]? | select(.type == "required_reviewers") | .prevent_self_review][0] // false),
+  reviewers: ([.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?
+               | {type: .type, id: .reviewer.id}] | if length == 0 then null else . end),
+  can_admins_bypass: (if .can_admins_bypass == null then true else .can_admins_bypass end),
+  deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}
+} | tojson'
+
 env_state=unknown        # missing | wrong-policy | ok
+env_body="{\"deployment_branch_policy\":${WANT_POLICY}}"   # for a new environment
 policies=""              # "<id> <type> <name>" per line
 if [ "${have_gh}" -eq 1 ]; then
   # Compared field by field in jq, not as a JSON string: key order is not a
@@ -211,9 +227,12 @@ if [ "${have_gh}" -eq 1 ]; then
       env_state=ok
     else
       env_state=wrong-policy
+      env_body="$(gh api "${env_api}" --jq "${ENV_BODY_JQ}")"
     fi
-    policies="$(gh api "${env_api}/deployment-branch-policies" \
-                  --jq '.branch_policies[] | "\(.id) \(.type // "branch") \(.name)"' 2>/dev/null || true)"
+    # Paginated: the list endpoint returns 30 rules a page, and a rule on page
+    # two would otherwise survive the convergence unseen.
+    policies="$(gh api --paginate "${env_api}/deployment-branch-policies?per_page=100" \
+                  --jq '.branch_policies[] | "\(.id) \(.type // "branch") \(.name)"')"
   else
     env_state=missing
   fi
@@ -239,8 +258,7 @@ else
   if [ "${env_state}" = "ok" ]; then
     echo "  environment ${GH_ENVIRONMENT} exists, custom branch policies on"
   else
-    printf '{"deployment_branch_policy":%s}' "${WANT_POLICY}" \
-      | gh api -X PUT "${env_api}" --input - >/dev/null
+    printf '%s' "${env_body}" | gh api -X PUT "${env_api}" --input - >/dev/null
     echo "  set         environment ${GH_ENVIRONMENT}: custom branch policies"
   fi
   if [ "${has_main}" -eq 1 ]; then
