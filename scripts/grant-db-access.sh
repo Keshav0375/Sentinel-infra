@@ -11,20 +11,36 @@
 #
 #   - Terraform has no resource for a role INSIDE a database. It attaches
 #     server-level Entra administrators and creates the database; mapping an
-#     Entra principal to a Postgres role is `pgaadauth_create_principal`, a SQL
-#     call (infra §3.2).
+#     Entra principal to a Postgres role is `pgaadauth_create_principal_with_oid`,
+#     a SQL call (infra §3.2).
 #   - gha-app is a database principal, NOT a server admin (decision 2026-10-05).
 #     The app pipeline runs on every merge to a repo whose branches are broken
 #     on purpose; it may record a deploy, it may not drop the database.
-#   - Only an Entra admin can call pgaadauth_create_principal, and the CI
-#     identities are deliberately not admins.
+#   - Only an Entra admin can create an Entra principal, and the CI identities
+#     are deliberately not admins.
 #
-# ── Idempotent, and meant to be re-run ───────────────────────────────────────
-# The role is created only if it is missing, and GRANT is a no-op when the
-# privilege is already held. The `deployments` table is created by backend
-# phase 1's migration, not by infra, so on a fresh deployment the table grant
-# cannot happen yet: the script says so and exits 0. Re-run it after that
-# migration has run, and again after any destroy/recreate of the database.
+# ── Every privilege is VERIFIED, not assumed from a GRANT ────────────────────
+# A GRANT by someone who neither owns the object nor holds the grant option
+# does not fail: Postgres prints "WARNING: no privileges were granted" and
+# exits 0. So each GRANT here is an attempt, and what decides the result is
+# has_database_privilege / has_schema_privilege / has_table_privilege read
+# back afterwards. Any `false` exits non-zero and names what is missing.
+#
+# ── The table grant belongs to the table's OWNER ─────────────────────────────
+# `deployments` is created by backend phase 1's migration and owned by the
+# role that runs it, not by the Entra admin running this script. So that
+# migration (or its owner role) must itself run
+#     GRANT INSERT, SELECT ON deployments TO "gha-app";
+# This script still tries the same grant, which works only if the admin
+# happens to hold the grant option, and then VERIFIES it. On a deployment
+# where the table does not exist yet, it prints a NOTE and exits 0. Re-run it
+# after the migration, and after any destroy/recreate of the database.
+#
+# ── Idempotent ───────────────────────────────────────────────────────────────
+# The role is created only if it is missing, and a GRANT of a privilege
+# already held changes nothing. If the role exists but maps to a different
+# Entra object (gha-app was rebuilt), it refuses rather than silently keeping
+# a role no token will ever match.
 #
 # ── The token never leaves this process ──────────────────────────────────────
 # psql reads it from PGPASSWORD, which is the environment, not argv: an
@@ -50,6 +66,7 @@ nocr() { tr -d "${CR}"; }
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 EXPECTED_SUB="174e25ca-ab82-4671-a913-9c2f66e5924d"
+BOOTSTRAP_RG="${BOOTSTRAP_RG:-rg-sentinel-bootstrap}"
 ROLE="gha-app"
 TABLE="public.deployments"
 
@@ -119,6 +136,16 @@ fi
 # The Postgres role of an Entra user IS its UPN, verbatim (pg_admin_principal_name).
 ADMIN_UPN="$(az account show --query user.name -o tsv | nocr)"
 
+# The principal (object) ID the role is bound to. Binding by ID rather than by
+# display name means a same-named object elsewhere in the tenant cannot be
+# picked up, and a rebuilt gha-app is detected rather than silently mismatched.
+APP_OID="$(az identity show --name "${ROLE}" --resource-group "${BOOTSTRAP_RG}" --query principalId -o tsv 2>/dev/null | nocr || true)"
+if ! printf '%s' "${APP_OID}" | grep -Eq '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'; then
+  echo "error: could not resolve ${ROLE}'s principal ID in ${BOOTSTRAP_RG}." >&2
+  echo "       Run scripts/bootstrap-identities.sh first." >&2
+  exit 1
+fi
+
 echo "==> workspace ${workspace}"
 echo "==> server    ${PG_HOST}"
 echo "==> database  ${PG_DATABASE}"
@@ -135,41 +162,94 @@ pg() {
   psql -X -q -v ON_ERROR_STOP=1 -h "${PG_HOST}" -p 5432 -U "${ADMIN_UPN}" -d "${db}" "$@"
 }
 
+# One read-back query, printed as `t`/`f`.
+check() { pg "$1" -tA -c "$2"; }
+
+failed=()
+
 # ── 1. The role ───────────────────────────────────────────────────────────────
-# Roles are server-wide. The pgaadauth functions live in the `postgres`
-# database, so that is where the principal is created. The name must equal the
-# managed identity's display name: Azure resolves it to the object ID in Entra
-# and matches tokens on that ID from then on.
-role_exists="$(pg postgres -tA -c "SELECT 1 FROM pg_roles WHERE rolname = '${ROLE}'")"
-if [ "${role_exists}" = "1" ]; then
-  echo "    role ${ROLE} exists"
+# Roles are server-wide, so it is created once, from the `postgres` database.
+# pgaadauth_create_principal_with_oid(roleName, objectId, objectType, isAdmin,
+# isMfa): `service` covers managed identities; not admin, no MFA claim (a
+# workload token never carries one).
+# The binding is the role's pgaadauth security label, 'aadauth,oid=<id>,type=…'
+# (the documented format), read from the standard pg_seclabels view rather
+# than by guessing the case of pgaadauth_list_principals' column names.
+role_oid="$(check postgres "SELECT substring(label from 'oid=([0-9a-fA-F-]+)') FROM pg_seclabels WHERE provider = 'pgaadauth' AND objtype = 'role' AND objname = '${ROLE}'")"
+role_exists="$(check postgres "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${ROLE}')")"
+if [ "${role_exists}" = "t" ]; then
+  if [ "${role_oid}" != "${APP_OID}" ]; then
+    echo "REFUSING: role ${ROLE} exists but is bound to Entra object '${role_oid:-none}'," >&2
+    echo "  not ${ROLE}'s current principal ${APP_OID}. No token from ${ROLE} will match it." >&2
+    echo "  Drop it as the admin (DROP ROLE \"${ROLE}\";) and re-run this script." >&2
+    exit 1
+  fi
+  echo "    role ${ROLE} exists, bound to ${APP_OID}"
 else
-  echo "    creating Entra principal ${ROLE} (not admin, no MFA)"
-  pg postgres -tA -c "SELECT * FROM pgaadauth_create_principal('${ROLE}', false, false)" >/dev/null
+  pg postgres -tA -c "SELECT * FROM pg_catalog.pgaadauth_create_principal_with_oid('${ROLE}', '${APP_OID}', 'service', false, false)" >/dev/null
+  echo "    created role ${ROLE} for Entra object ${APP_OID} (service, not admin, no MFA)"
 fi
 
 # ── 2. Connect and schema usage ───────────────────────────────────────────────
-# Through stdin with psql variables: `:"db"` quotes the name as an identifier,
-# and -c would not interpolate it at all.
+# Attempted through stdin with psql variables: `:"db"` quotes the name as an
+# identifier, and -c would not interpolate it at all. Then read back.
+#
+# ACCEPTED, recorded (PR #16 review): PUBLIC keeps the default CONNECT and TEMP
+# on the shared server's databases, so CONNECT is not what keeps one
+# deployment's principal out of another's database. That is acceptable because
+# CONNECT alone reaches no data: in PG16 the public schema grants PUBLIC no
+# CREATE and no table privileges, so a principal sees only what it is granted.
 pg "${PG_DATABASE}" -v db="${PG_DATABASE}" -v role="${ROLE}" <<'SQL'
 GRANT CONNECT ON DATABASE :"db" TO :"role";
 GRANT USAGE ON SCHEMA public TO :"role";
 SQL
-echo "    granted CONNECT on ${PG_DATABASE}, USAGE on schema public"
+if [ "$(check "${PG_DATABASE}" "SELECT has_database_privilege('${ROLE}', current_database(), 'CONNECT')")" = "t" ]; then
+  echo "    verified CONNECT on ${PG_DATABASE}"
+else
+  failed+=("CONNECT on database ${PG_DATABASE}")
+fi
+if [ "$(check "${PG_DATABASE}" "SELECT has_schema_privilege('${ROLE}', 'public', 'USAGE')")" = "t" ]; then
+  echo "    verified USAGE on schema public"
+else
+  failed+=("USAGE on schema public")
+fi
 
 # ── 3. The table, if the backend has created it ───────────────────────────────
-table_exists="$(pg "${PG_DATABASE}" -tA -c "SELECT to_regclass('${TABLE}') IS NOT NULL")"
+table_exists="$(check "${PG_DATABASE}" "SELECT to_regclass('${TABLE}') IS NOT NULL")"
 if [ "${table_exists}" = "t" ]; then
+  # An attempt only (see the header). A non-owner without the grant option
+  # gets a WARNING here, which psql passes through to stderr.
   pg "${PG_DATABASE}" -v role="${ROLE}" <<'SQL'
 GRANT INSERT, SELECT ON public.deployments TO :"role";
 SQL
-  echo "    granted INSERT, SELECT on ${TABLE}"
-  echo
-  echo "==> done. ${ROLE} can record deploys in ${PG_DATABASE}."
+  for priv in INSERT SELECT; do
+    if [ "$(check "${PG_DATABASE}" "SELECT has_table_privilege('${ROLE}', '${TABLE}', '${priv}')")" = "t" ]; then
+      echo "    verified ${priv} on ${TABLE}"
+    else
+      failed+=("${priv} on ${TABLE}")
+    fi
+  done
+fi
+
+if [ "${#failed[@]}" -gt 0 ]; then
+  echo >&2
+  echo "FAILED: ${ROLE} does NOT hold:" >&2
+  for f in "${failed[@]}"; do echo "  - ${f}" >&2; done
+  echo >&2
+  echo "  A table privilege must be granted by the table's owner: backend phase 1's" >&2
+  echo "  migration (or its owner role) runs" >&2
+  echo "      GRANT INSERT, SELECT ON deployments TO \"${ROLE}\";" >&2
+  echo "  then re-run this script to verify." >&2
+  exit 1
+fi
+
+echo
+if [ "${table_exists}" = "t" ]; then
+  echo "==> done. ${ROLE} can record deploys in ${PG_DATABASE} (verified)."
 else
-  echo
   echo "NOTE: ${TABLE} does not exist yet in ${PG_DATABASE}, so the table grant is PENDING."
-  echo "      It is created by backend phase 1's migration. Re-run this script after"
-  echo "      that migration; until then the app pipeline's record stage fails with"
+  echo "      Backend phase 1's migration creates it and must grant INSERT, SELECT to"
+  echo "      \"${ROLE}\" as the table's owner. Re-run this script after that migration"
+  echo "      to verify; until then the app pipeline's record stage fails with"
   echo "      \"relation does not exist\" (decision 2026-10-05, record-stage policy)."
 fi

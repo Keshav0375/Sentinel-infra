@@ -316,11 +316,18 @@ before it:
    ```
 
    Terraform cannot do this: a role *inside* a database has no resource (decision 2026-10-05,
-   R12). The script creates `gha-app` as a database principal — not an admin — and grants
-   CONNECT and schema USAGE. `INSERT, SELECT` on `deployments` waits for that table: backend
-   phase 1's migration creates it, and until then the script prints a NOTE and the pipeline's
-   record stage fails visibly. **Re-run the script after that migration**, and after any
-   recreate of the database. It is idempotent.
+   R12). The script creates `gha-app` as a database principal, not an admin, bound to its
+   Entra **object ID** (`pgaadauth_create_principal_with_oid`). It tries CONNECT and schema
+   USAGE and then **verifies** them with `has_*_privilege`, because a GRANT that changes
+   nothing only prints a WARNING and still exits 0. It exits non-zero if any privilege is
+   missing.
+
+   `INSERT, SELECT` on `deployments` must come from **the table's owner**. Backend phase 1's
+   migration creates the table, and it (or its owner role) runs
+   `GRANT INSERT, SELECT ON deployments TO "gha-app"`. This script also tries the grant, then
+   verifies it. Until the table exists the script prints a NOTE, and the pipeline's record
+   stage fails visibly. **Re-run the script after that migration**, and after any recreate of
+   the database. It is idempotent.
 4. **Push the pipeline's configuration**:
 
    ```bash
