@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# One-time bootstrap: the three CI identities.
+# One-time bootstrap: the four CI identities.
 #
 # Terraform cannot create the identity its own pipeline authenticates as, so
 # these live in rg-sentinel-bootstrap beside the state account — same trust root,
 # same reason.
 #
-# ── Why THREE and not one ────────────────────────────────────────────────────
+# ── Why THREE infra identities and not one ───────────────────────────────────
 # Dynamic deployments create their own resource groups and destroy must purge
 # Key Vaults. Neither is possible with rights scoped to one resource group, so
 # CI needs SUBSCRIPTION scope. That reverses R5.
@@ -19,12 +19,26 @@
 #   gha-plan    Reader + blob READER      pull_request, environment:plan
 #   gha-deploy  Contributor + RBAC Admin  environment:production, environment:destroy
 #   gha-ops     custom start/stop role    environment:ops
+#   gha-app     NO subscription role      Sentinel-deployment environment:sentinel-dev
 #
 # A job declaring `environment: X` gets the OIDC subject
 # `repo:<owner>/<repo>:environment:X` instead of the branch form, and GitHub will
 # NOT mint that for a pull_request event. gha-deploy is therefore unreachable
 # from a PR BY CONSTRUCTION — there is no rule to misconfigure. Same mechanism
 # that failed phase 4's first apply, used deliberately.
+#
+# ── gha-app — the app pipeline's identity, not the estate's ──────────────────
+# Sentinel-deployment's pipeline deploys code into an App Service that already
+# exists and records the deploy in Postgres. It needs neither to create nor to
+# delete anything, and it runs on every merge to a repo whose branches are
+# broken ON PURPOSE. So it is a fourth identity rather than new FICs on
+# gha-deploy, which can empty the subscription (decision 2026-10-05, R7).
+#
+# It lives here, not in the deployment layer, so its client ID survives every
+# destroy/recreate of a deployment and the GitHub secret is pushed once. It
+# holds NO role from this script: the deployment layer grants it Website
+# Contributor on that deployment's App Service only, and scripts/
+# grant-db-access.sh makes it a database principal (not a server admin).
 #
 # ── gha-plan gets blob READER, not Contributor ───────────────────────────────
 # `terraform plan` normally takes a state lock, which is a blob WRITE. Granting
@@ -62,6 +76,7 @@ LOCATION="${LOCATION:-canadacentral}"
 BOOTSTRAP_RG="${BOOTSTRAP_RG:-rg-sentinel-bootstrap}"
 GITHUB_OWNER="${GITHUB_OWNER:-Keshav0375}"
 INFRA_REPO="${INFRA_REPO:-Sentinel-infra}"
+DEPLOYMENT_REPO="${DEPLOYMENT_REPO:-Sentinel-deployment}"
 OPS_ROLE_NAME="Sentinel Ops Start Stop"
 
 uid6="$(printf '%s' "${EXPECTED_SUB}" | sha1sum | cut -c1-6)"
@@ -332,6 +347,14 @@ fi
 
 ensure_fic "gha-ops" "ops-environment" "repo:${GITHUB_OWNER}/${INFRA_REPO}:environment:ops"
 
+# ── gha-app — deploys app code, holds nothing at subscription scope ───────────
+# Deliberately no ensure_role here; see the header. One subject only: the
+# environment form means a pull_request event can never mint it.
+echo
+echo "-- gha-app -------------------------------------------"
+ensure_identity "gha-app"
+ensure_fic "gha-app" "app-sentinel-dev" "repo:${GITHUB_OWNER}/${DEPLOYMENT_REPO}:environment:sentinel-dev"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 cat <<SUMMARY
 
@@ -342,6 +365,11 @@ cat <<SUMMARY
       AZURE_CLIENT_ID_PLAN    $(client_of gha-plan)
       AZURE_CLIENT_ID_DEPLOY  $(client_of gha-deploy)
       AZURE_CLIENT_ID_OPS     $(client_of gha-ops)
+      GHA_APP_OBJECT_ID       $(principal_of gha-app)
+
+    GHA_APP_OBJECT_ID is the principal (object) ID, not the client ID: the
+    deployment layer assigns it Website Contributor. gha-app's CLIENT ID goes to
+    Sentinel-deployment, not here — scripts/push-deploy-config.sh pushes it.
 
 ==> STILL MANUAL — the identity tenant (R4).
 
@@ -353,6 +381,7 @@ cat <<SUMMARY
 
       needed:     environment:plan, environment:production, environment:destroy
       NOT needed: environment:ops - pause/resume never runs Terraform
+      NOT needed: gha-app - the app pipeline never runs Terraform
 
     See docs/BOOTSTRAP.md.
 SUMMARY
