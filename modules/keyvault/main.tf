@@ -23,6 +23,19 @@ terraform {
   }
 }
 
+# ── tfsec: two accepted risks, both forced by how this vault is reached ──────
+# azure-keyvault-specify-network-acl: the vault is read and written from
+#   GitHub-hosted runners (seed-vault.sh, the backend's incident workflow), whose
+#   egress IPs rotate across thousands of ranges, and by Consumption-plan
+#   Functions with no fixed outbound IP. Default-deny would need private
+#   networking the architecture does not have. Access is governed by RBAC alone
+#   (rbac_authorization_enabled below), and the vault holds nothing Terraform
+#   wrote.
+# azure-keyvault-no-purge: deliberate; see soft_delete_retention_days below.
+#   Purge protection would strand this globally unique name for 90 days after
+#   every teardown and break the destroy -> recreate loop.
+#tfsec:ignore:azure-keyvault-specify-network-acl
+#tfsec:ignore:azure-keyvault-no-purge
 resource "azurerm_key_vault" "sentinel" {
   name                = var.vault_name
   resource_group_name = var.resource_group_name

@@ -23,6 +23,16 @@ terraform {
   }
 }
 
+# ── tfsec: two accepted risks ────────────────────────────────────────────────
+# azure-container-limit-authorized-ips: the API server is called from
+#   GitHub-hosted runners (the kubernetes provider in the deployment layer,
+#   gha-plan's reads), whose egress IPs are not a stable allowlist. Access is
+#   gated by Entra-integrated Kubernetes RBAC instead (azure_rbac_enabled below).
+# azure-container-logging: Container Insights needs a Log Analytics workspace,
+#   billed per GB ingested, against a stack costed at ~$0 idle (infra §11).
+#   Datadog is the observability plane for everything Sentinel watches.
+#tfsec:ignore:azure-container-limit-authorized-ips
+#tfsec:ignore:azure-container-logging
 resource "azurerm_kubernetes_cluster" "sentinel" {
   name                = var.cluster_name
   location            = var.location
