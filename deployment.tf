@@ -264,3 +264,25 @@ module "app_service" {
   location            = local.location
   app_name            = module.naming.names.app_service
 }
+
+# ── gha-app may deploy code to THIS app and nothing else ─────────────────────
+# Decision 2026-10-05 (R7). gha-app is the Sentinel-deployment pipeline's
+# identity, created by scripts/bootstrap-identities.sh with no role at all. This
+# is its only Azure grant: Website Contributor scoped to one web app, so a
+# compromised app pipeline can redeploy or restart the target and cannot touch
+# the plan, the resource group, or anything else in the subscription.
+#
+# Gated on the variable as well as the component: an unset GHA_APP_OBJECT_ID
+# repository variable must plan a deployment, not fail it.
+resource "azurerm_role_assignment" "gha_app_website_contributor" {
+  count = (local.want_app_service && var.gha_app_object_id != null && var.gha_app_object_id != "") ? 1 : 0
+
+  scope                = module.app_service[0].app_id
+  role_definition_name = "Website Contributor"
+  principal_id         = var.gha_app_object_id
+
+  # Same flag and reason as the vault grants in modules/keyvault: no directory
+  # lookup against a service principal Terraform did not create. Create-only —
+  # it fails with "doesn't support update" if added to an existing assignment.
+  skip_service_principal_aad_check = true
+}

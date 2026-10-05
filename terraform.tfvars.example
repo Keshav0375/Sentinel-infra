@@ -8,3 +8,7 @@ subscription_id = "<your-subscription-id>"
 
 pg_admin_object_id      = "<az ad signed-in-user show --query id -o tsv>"
 pg_admin_principal_name = "<your-upn>"
+
+# Deployment layer only. gha-app's PRINCIPAL id (not its client id), printed by
+# scripts/bootstrap-identities.sh. Omit it and the App Service grant is skipped.
+# gha_app_object_id = "<az identity show -g rg-sentinel-bootstrap -n gha-app --query principalId -o tsv>"
