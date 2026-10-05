@@ -222,7 +222,6 @@ ENV_BODY_JQ='{
 
 env_state=unknown        # missing | wrong-policy | ok
 env_body="{\"deployment_branch_policy\":${WANT_POLICY}}"   # for a new environment
-policies=""              # "<id> <type> <name>" per line
 if [ "${have_gh}" -eq 1 ]; then
   # Compared field by field in jq, not as a JSON string: key order is not a
   # contract. A null policy (no restriction at all) compares false.
@@ -234,21 +233,32 @@ if [ "${have_gh}" -eq 1 ]; then
       env_state=wrong-policy
       env_body="$(gh api "${env_api}" --jq "${ENV_BODY_JQ}")"
     fi
-    # Paginated: the list endpoint returns 30 rules a page, and a rule on page
-    # two would otherwise survive the convergence unseen.
-    policies="$(gh api --paginate "${env_api}/deployment-branch-policies?per_page=100" \
-                  --jq '.branch_policies[] | "\(.id) \(.type // "branch") \(.name)"')"
   else
     env_state=missing
   fi
 fi
 
-has_main=0
-extra_policies=()
-while IFS= read -r p; do
-  [ -n "${p}" ] || continue
-  if [ "${p#* }" = "branch main" ]; then has_main=1; else extra_policies+=("${p}"); fi
-done <<< "${policies}"
+# The rule list exists only once the environment uses CUSTOM branch policies:
+# with a null (or protected-branches) policy GitHub answers the list call with
+# 404. So it is read only after the PUT has made the policy custom, or when it
+# already was, and from then on a failed read stops the script. Paginated: the
+# endpoint returns 30 rules a page, and a rule on page two would otherwise
+# survive the convergence unseen.
+list_policies() {
+  gh api --paginate "${env_api}/deployment-branch-policies?per_page=100" \
+    --jq '.branch_policies[] | "\(.id) \(.type // "branch") \(.name)"'
+}
+
+# Sets has_main and extra_policies from list_policies' output.
+sort_policies() {
+  local p
+  has_main=0
+  extra_policies=()
+  while IFS= read -r p; do
+    [ -n "${p}" ] || continue
+    if [ "${p#* }" = "branch main" ]; then has_main=1; else extra_policies+=("${p}"); fi
+  done <<< "$1"
+}
 
 if [ "${DRY_RUN}" -eq 1 ]; then
   case "${env_state}" in
@@ -257,8 +267,14 @@ if [ "${DRY_RUN}" -eq 1 ]; then
     missing)      echo "  would create environment ${GH_ENVIRONMENT} with custom branch policies" ;;
     *)            echo "  would create/align environment ${GH_ENVIRONMENT} (gh unavailable, not checked)" ;;
   esac
-  [ "${has_main}" -eq 1 ] && echo "  branch policy main exists" || echo "  would add   branch policy main"
-  for p in ${extra_policies[@]+"${extra_policies[@]}"}; do echo "  would remove branch policy ${p#* }"; done
+  if [ "${env_state}" = "ok" ]; then
+    listed="$(list_policies)"
+    sort_policies "${listed}"
+    [ "${has_main}" -eq 1 ] && echo "  branch policy main exists" || echo "  would add   branch policy main"
+    for p in ${extra_policies[@]+"${extra_policies[@]}"}; do echo "  would remove branch policy ${p#* }"; done
+  else
+    echo "  would add   branch policy main (no custom rules exist yet)"
+  fi
 else
   if [ "${env_state}" = "ok" ]; then
     echo "  environment ${GH_ENVIRONMENT} exists, custom branch policies on"
@@ -266,6 +282,11 @@ else
     printf '%s' "${env_body}" | gh api -X PUT "${env_api}" --input - >/dev/null
     echo "  set         environment ${GH_ENVIRONMENT}: custom branch policies"
   fi
+  # An assignment, not `sort_policies "$(list_policies)"`: set -e ignores a
+  # failed substitution inside a command's arguments, and a failed read here
+  # must stop the script rather than converge against an empty list.
+  listed="$(list_policies)"
+  sort_policies "${listed}"
   if [ "${has_main}" -eq 1 ]; then
     echo "  branch policy main exists"
   else
