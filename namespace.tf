@@ -137,6 +137,16 @@ resource "kubernetes_limit_range" "deployment" {
 # reach every other pod cluster-wide unless a policy says otherwise. On a shared
 # cluster that means one deployment's pod could reach another's, which would
 # undo at the network layer the isolation the token model provides.
+#
+# ENFORCED by the cluster's Cilium data plane (modules/aks, network_profile).
+# Before that existed this object was stored and ignored: Kubernetes accepts a
+# NetworkPolicy whether or not any engine enforces it, and nothing says so.
+#
+# Enforcement cuts both ways. Traffic from OUTSIDE the cluster, including a
+# public LoadBalancer Service, matches no namespace selector here and is
+# dropped too. The backend's LoadBalancer (backend §8.5) therefore needs its
+# own allow rule for its pods and port before it can be reached. Not added
+# here: that rule belongs with the backend's manifests and labels.
 resource "kubernetes_network_policy" "default_deny_ingress" {
   count = local.c_namespace
 

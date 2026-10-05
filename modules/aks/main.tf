@@ -109,6 +109,30 @@ resource "azurerm_kubernetes_cluster" "sentinel" {
     tenant_id          = var.tenant_id
   }
 
+  # ── Network policy that is actually ENFORCED ──────────────────────────────
+  # namespace.tf gives every deployment a default-deny-ingress NetworkPolicy.
+  # Kubernetes stores that object whether or not anything enforces it; without
+  # a policy engine it is inert, and every pod can reach every other pod across
+  # namespaces. Cilium is the engine, and it requires Azure CNI with overlay.
+  #
+  # Cilium rather than Azure NPM or Calico: it runs on the arm64 B2pls_v2
+  # node, it is the data plane Azure is converging on, and kubenet (the only
+  # thing Calico would pair with here without a VNet) is being retired.
+  #
+  # Addressing is left to the AKS defaults, and none of them collides: this
+  # module sets no VNet, so AKS creates a managed one (10.224.0.0/12); overlay
+  # pods take 10.244.0.0/16, services 10.0.0.0/16, kube-dns 10.0.0.10.
+  #
+  # ForceNew except for some in-place upgrades, so on a live cluster this is a
+  # recreate, and a recreate changes the OIDC issuer that every deployment's
+  # federated credential trusts. Added while no cluster exists (2026-10-04).
+  network_profile {
+    network_plugin      = "azure"
+    network_plugin_mode = "overlay"
+    network_data_plane  = "cilium"
+    network_policy      = "cilium"
+  }
+
   identity {
     type = "SystemAssigned"
   }
