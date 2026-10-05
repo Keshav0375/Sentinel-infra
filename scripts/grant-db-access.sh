@@ -173,12 +173,15 @@ failed=()
 # isMfa): `service` covers managed identities; not admin, no MFA claim (a
 # workload token never carries one).
 # The binding is the role's pgaadauth security label, 'aadauth,oid=<id>,type=…'
-# (the documented format), read from the standard pg_seclabels view rather
-# than by guessing the case of pgaadauth_list_principals' column names.
-role_oid="$(check postgres "SELECT substring(label from 'oid=([0-9a-fA-F-]+)') FROM pg_seclabels WHERE provider = 'pgaadauth' AND objtype = 'role' AND objname = '${ROLE}'")"
+# (the documented format). Read from the shared catalog pg_shseclabel joined to
+# pg_roles by OID, not from the pg_seclabels view: that view's objname is
+# quote_ident(rolname), i.e. `"gha-app"` WITH the quotes, so matching it on the
+# bare name never finds the row and every re-run would refuse. Lowercased on
+# both sides, because a GUID's case is not part of its identity.
+role_oid="$(check postgres "SELECT lower(substring(s.label from 'oid=([0-9a-fA-F-]+)')) FROM pg_catalog.pg_shseclabel s JOIN pg_catalog.pg_roles r ON r.oid = s.objoid WHERE s.classoid = 'pg_catalog.pg_authid'::regclass AND s.provider = 'pgaadauth' AND r.rolname = '${ROLE}'")"
 role_exists="$(check postgres "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${ROLE}')")"
 if [ "${role_exists}" = "t" ]; then
-  if [ "${role_oid}" != "${APP_OID}" ]; then
+  if [ "${role_oid}" != "$(printf '%s' "${APP_OID}" | tr '[:upper:]' '[:lower:]')" ]; then
     echo "REFUSING: role ${ROLE} exists but is bound to Entra object '${role_oid:-none}'," >&2
     echo "  not ${ROLE}'s current principal ${APP_OID}. No token from ${ROLE} will match it." >&2
     echo "  Drop it as the admin (DROP ROLE \"${ROLE}\";) and re-run this script." >&2
