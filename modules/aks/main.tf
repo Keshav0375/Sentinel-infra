@@ -24,10 +24,18 @@ terraform {
 }
 
 # ── tfsec: two accepted risks ────────────────────────────────────────────────
-# azure-container-limit-authorized-ips: the API server is called from
-#   GitHub-hosted runners (the kubernetes provider in the deployment layer,
-#   gha-plan's reads), whose egress IPs are not a stable allowlist. Access is
-#   gated by Entra-integrated Kubernetes RBAC instead (azure_rbac_enabled below).
+# azure-container-limit-authorized-ips: the API server is public with no IP
+#   allowlist, because it is called from GitHub-hosted runners (the kubernetes
+#   provider in the deployment layer, gha-plan's reads) whose egress IPs are
+#   not a stable allowlist. Entra-integrated Kubernetes RBAC (azure_rbac_enabled
+#   below) gates Entra tokens, and that is NOT the whole surface: local accounts
+#   are still ENABLED (local_account_disabled is deferred, see the RBAC block
+#   below), so the static cluster-admin client certificate from
+#   `az aks get-credentials --admin` bypasses Entra RBAC entirely, and with no
+#   IP allowlist that certificate works from anywhere on the internet. Whoever
+#   holds it, or can call listClusterAdminCredential (gha-deploy's Cluster Admin
+#   Role), is cluster-admin. Accepted by the owner (PR #16 review); disabling
+#   local accounts is being raised separately.
 # azure-container-logging: Container Insights needs a Log Analytics workspace,
 #   billed per GB ingested, against a stack costed at ~$0 idle (infra §11).
 #   Datadog is the observability plane for everything Sentinel watches.
