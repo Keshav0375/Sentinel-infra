@@ -339,6 +339,14 @@ before it:
 `repo:Keshav0375/Sentinel-deployment:environment:sentinel-dev`, and a job in any other
 environment cannot get a token.
 
+**Only a workflow run on `main` can mint `gha-app`'s token.** The federated subject pins the
+*environment*, not the branch, so the script also gives `sentinel-dev` a custom deployment
+branch policy that allows exactly `main`, and removes any other rule it finds. Without it,
+any branch pushed to Sentinel-deployment could declare `environment: sentinel-dev` and deploy,
+and that repo's branches are broken on purpose. GitHub rejects a job from any other branch
+before it starts, so no token is ever minted for it. Re-running the script restores the
+policy if someone loosens it by hand.
+
 ---
 
 ## Day 2 — stopping and starting

@@ -12,6 +12,10 @@
 # `repo:Keshav0375/Sentinel-deployment:environment:sentinel-dev`, so any other
 # environment name would hold credentials no job can use.
 #
+# The environment is restricted to the `main` branch (custom deployment branch
+# policy, exactly `main`), so ONLY A WORKFLOW RUN ON MAIN can enter it and mint
+# gha-app's token. A scenario branch can run a workflow; it cannot deploy.
+#
 #   secrets    AZURE_CLIENT_ID (gha-app), AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
 #              DD_API_KEY
 #   variables  AZURE_RG, APP_NAME, DEPLOYED_APP_URL, PG_HOST, PG_DATABASE,
@@ -31,7 +35,8 @@
 # ── Secret values never touch argv or output ─────────────────────────────────
 # `gh secret set --body "$v"` puts the value in the process table; stdin keeps
 # it in a pipe. A dry run reports a secret's length, never its value. Variables
-# are not secret — GitHub shows them in every log — so they are printed.
+# are not secret — GitHub shows them in every log — so they are printed. gh's
+# own errors pass through to stderr: they name the API failure, never a value.
 #
 # ── The .env is parsed, not sourced ──────────────────────────────────────────
 # Same rules as set-gh-secrets.sh: split on the first `=`, strip a trailing CR
@@ -181,29 +186,73 @@ echo "env file:    ${ENV_FILE}"
 [ "${DRY_RUN}" -eq 1 ] && echo "mode:        DRY RUN — nothing will be written"
 echo
 
-# ── The environment ───────────────────────────────────────────────────────────
-# PUT is idempotent: it creates the environment or leaves an existing one (and
-# its protection rules) as it is.
-env_exists=unknown
+# ── The environment, and who may enter it ───────────────────────────────────
+# Only a workflow run on `main` may enter sentinel-dev, so only a run on main
+# can mint gha-app's token. The FIC pins the ENVIRONMENT, not the branch:
+# without a branch policy, any branch pushed to Sentinel-deployment (and its
+# branches are broken on purpose) could declare `environment: sentinel-dev`
+# and deploy. GitHub refuses the job before it starts when the branch is not
+# allowed, so the token is never minted.
+#
+# Converged, not accumulated: custom policies, exactly one rule (`main`, type
+# branch), and any other rule removed. Each call is skipped when the state
+# already matches, so a re-run writes nothing.
+env_api="repos/${REPO}/environments/${GH_ENVIRONMENT}"
+WANT_POLICY='{"protected_branches":false,"custom_branch_policies":true}'
+
+env_state=unknown        # missing | wrong-policy | ok
+policies=""              # "<id> <type> <name>" per line
 if [ "${have_gh}" -eq 1 ]; then
-  if gh api "repos/${REPO}/environments/${GH_ENVIRONMENT}" >/dev/null 2>&1; then
-    env_exists=yes
+  # Compared field by field in jq, not as a JSON string: key order is not a
+  # contract. A null policy (no restriction at all) compares false.
+  if current="$(gh api "${env_api}" --jq '.deployment_branch_policy.protected_branches == false
+                and .deployment_branch_policy.custom_branch_policies == true' 2>/dev/null)"; then
+    if [ "${current}" = "true" ]; then
+      env_state=ok
+    else
+      env_state=wrong-policy
+    fi
+    policies="$(gh api "${env_api}/deployment-branch-policies" \
+                  --jq '.branch_policies[] | "\(.id) \(.type // "branch") \(.name)"' 2>/dev/null || true)"
   else
-    env_exists=no
+    env_state=missing
   fi
 fi
 
+has_main=0
+extra_policies=()
+while IFS= read -r p; do
+  [ -n "${p}" ] || continue
+  if [ "${p#* }" = "branch main" ]; then has_main=1; else extra_policies+=("${p}"); fi
+done <<< "${policies}"
+
 if [ "${DRY_RUN}" -eq 1 ]; then
-  case "${env_exists}" in
-    yes) echo "  environment ${GH_ENVIRONMENT} exists" ;;
-    no)  echo "  would create environment ${GH_ENVIRONMENT}" ;;
-    *)   echo "  would create environment ${GH_ENVIRONMENT} if missing (gh unavailable, not checked)" ;;
+  case "${env_state}" in
+    ok)           echo "  environment ${GH_ENVIRONMENT} exists, custom branch policies on" ;;
+    wrong-policy) echo "  would set   ${GH_ENVIRONMENT} to custom branch policies" ;;
+    missing)      echo "  would create environment ${GH_ENVIRONMENT} with custom branch policies" ;;
+    *)            echo "  would create/align environment ${GH_ENVIRONMENT} (gh unavailable, not checked)" ;;
   esac
-elif [ "${env_exists}" = "yes" ]; then
-  echo "  environment ${GH_ENVIRONMENT} exists"
+  [ "${has_main}" -eq 1 ] && echo "  branch policy main exists" || echo "  would add   branch policy main"
+  for p in ${extra_policies[@]+"${extra_policies[@]}"}; do echo "  would remove branch policy ${p#* }"; done
 else
-  gh api -X PUT "repos/${REPO}/environments/${GH_ENVIRONMENT}" >/dev/null
-  echo "  created     environment ${GH_ENVIRONMENT}"
+  if [ "${env_state}" = "ok" ]; then
+    echo "  environment ${GH_ENVIRONMENT} exists, custom branch policies on"
+  else
+    printf '{"deployment_branch_policy":%s}' "${WANT_POLICY}" \
+      | gh api -X PUT "${env_api}" --input - >/dev/null
+    echo "  set         environment ${GH_ENVIRONMENT}: custom branch policies"
+  fi
+  if [ "${has_main}" -eq 1 ]; then
+    echo "  branch policy main exists"
+  else
+    gh api -X POST "${env_api}/deployment-branch-policies" -f name=main -f type=branch >/dev/null
+    echo "  added       branch policy main"
+  fi
+  for p in ${extra_policies[@]+"${extra_policies[@]}"}; do
+    gh api -X DELETE "${env_api}/deployment-branch-policies/${p%% *}" >/dev/null
+    echo "  removed     branch policy ${p#* }"
+  done
 fi
 
 # ── Secrets, by stdin ─────────────────────────────────────────────────────────
@@ -215,7 +264,7 @@ for n in "${SECRET_ORDER[@]}"; do
     continue
   fi
   if printf '%s' "${!v}" \
-       | gh secret set "${n}" --env "${GH_ENVIRONMENT}" --repo "${REPO}" >/dev/null 2>&1; then
+       | gh secret set "${n}" --env "${GH_ENVIRONMENT}" --repo "${REPO}" >/dev/null; then
     echo "  set         secret   ${n}"
   else
     echo "  FAILED      secret   ${n}" >&2
@@ -231,7 +280,7 @@ for n in "${VAR_ORDER[@]}"; do
     continue
   fi
   if gh variable set "${n}" --env "${GH_ENVIRONMENT}" --repo "${REPO}" \
-       --body "${!v}" >/dev/null 2>&1; then
+       --body "${!v}" >/dev/null; then
     echo "  set         variable ${n} = ${!v}"
   else
     echo "  FAILED      variable ${n}" >&2
