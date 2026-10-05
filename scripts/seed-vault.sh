@@ -26,6 +26,12 @@
 # the rotation Function watches — so a secret would never appear near-expiry and
 # rotation would never fire. This writes only when the secret is absent or is
 # within RENEW_WITHIN_DAYS of expiring.
+#
+# ── Retries 403 Forbidden, and only that ─────────────────────────────────────
+# A new role assignment takes minutes to reach the Key Vault data plane: a live
+# apply on 2026-10-05 failed here 96s after the Secrets Officer grant. Every
+# data-plane call is retried on 403 with backoff (6 attempts, ~4 min of waits).
+# Any other failure is not propagation and fails at once.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -67,6 +73,28 @@ if [ -z "${VAULT}" ]; then
   exit 2
 fi
 
+# Seconds to wait before attempts 2..6. Overridable so tests need not sleep.
+read -r -a RETRY_DELAYS <<< "${SEED_RETRY_DELAYS:-15 30 45 60 90}"
+
+# Run one data-plane `az` call, retrying while it fails with 403 Forbidden.
+# stdout passes through; stderr is captured, inspected and DROPPED, never
+# printed, so nothing az says about the request can carry a value into a log.
+kv_call() {
+  local what="$1"; shift
+  local err attempt=1 total=$(( ${#RETRY_DELAYS[@]} + 1 ))
+  while :; do
+    if err="$("$@" 2>&1 1>&3)"; then return 0; fi 3>&1
+    if [ "${attempt}" -ge "${total}" ] || ! grep -qiwE 'forbidden|403' <<< "${err}"; then
+      return 1
+    fi
+    local delay="${RETRY_DELAYS[attempt-1]}"
+    echo "  403       ${what}: data-plane access not live yet (role assignment still" \
+         "propagating?) — attempt ${attempt}/${total}, retrying in ${delay}s" >&2
+    sleep "${delay}"
+    attempt=$(( attempt + 1 ))
+  done
+}
+
 # A deployment without the keyvault component has no vault, and that is a valid
 # configuration rather than a failure.
 if ! az keyvault show --name "${VAULT}" -o none 2>/dev/null; then
@@ -102,8 +130,11 @@ for env_name in "${SECRETS[@]}"; do
 
   # Read the CURRENT expiry, if the secret exists at all. `|| true` because a
   # missing secret is the normal first-apply case and must not trip `set -e`.
-  current_expiry="$(az keyvault secret show --vault-name "${VAULT}" --name "${secret_name}" \
-                      --query "attributes.expires" -o tsv 2>/dev/null || true)"
+  # Retried on 403 too: a read that 403s would otherwise look like "absent" and
+  # the write below would churn a version of a secret that is still current.
+  current_expiry="$(kv_call "read ${secret_name}" \
+                      az keyvault secret show --vault-name "${VAULT}" --name "${secret_name}" \
+                      --query "attributes.expires" -o tsv || true)"
 
   if [ -n "${current_expiry}" ] && [ "${current_expiry}" != "None" ]; then
     current_epoch="$(date -u -d "${current_expiry}" '+%s' 2>/dev/null || echo 0)"
@@ -128,16 +159,18 @@ for env_name in "${SECRETS[@]}"; do
   # An expiry is mandatory, not decorative: the rotation Function subscribes to
   # SecretNearExpiry, and a secret with no expiry never raises that event and so
   # is never rotated.
-  if az keyvault secret set \
-       --vault-name "${VAULT}" \
-       --name "${secret_name}" \
-       --value "${value}" \
-       --expires "${expires_on}" \
-       -o none 2>/dev/null; then
+  if kv_call "write ${secret_name}" \
+       az keyvault secret set \
+         --vault-name "${VAULT}" \
+         --name "${secret_name}" \
+         --value "${value}" \
+         --expires "${expires_on}" \
+         -o none; then
     echo "  set       ${secret_name}  (expires ${expires_on%%T*})"
     set_count=$(( set_count + 1 ))
   else
-    echo "::error::failed to write ${secret_name} to ${VAULT}." >&2
+    echo "::error::failed to write ${secret_name} to ${VAULT} (403s are retried; this" >&2
+    echo "::error::is either another error or a 403 that outlasted every retry)." >&2
     echo "::error::The usual cause is data-plane access: Contributor can create a vault" >&2
     echo "::error::but not write to it. Check that kv_seeder_object_id was passed to the" >&2
     echo "::error::apply so modules/keyvault granted Key Vault Secrets Officer." >&2
