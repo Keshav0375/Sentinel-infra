@@ -34,7 +34,9 @@ on:
         default: pause
         options: [pause, resume]
       scope:
-        description: 'platform = the shared cluster and database (affects EVERY deployment) · all = everything · or a single deployment name'
+        description: >-
+          platform = the shared cluster and database (affects EVERY deployment) · all = everything ·
+          or a single deployment name
         type: string
         required: true
         default: platform
