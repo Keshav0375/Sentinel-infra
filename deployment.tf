@@ -272,10 +272,17 @@ module "app_service" {
 # compromised app pipeline can redeploy or restart the target and cannot touch
 # the plan, the resource group, or anything else in the subscription.
 #
-# Gated on the variable as well as the component: an unset GHA_APP_OBJECT_ID
-# repository variable must plan a deployment, not fail it.
+# Gated three ways: the component, the variable (an unset GHA_APP_OBJECT_ID
+# repository variable must plan a deployment, not fail it), and the target.
+# Only the deployment gha-app's single federated environment points at
+# (var.gha_app_target, `sentinel-dev`) gets the grant; any other deployment's
+# app stays out of the pipeline identity's reach.
 resource "azurerm_role_assignment" "gha_app_website_contributor" {
-  count = (local.want_app_service && var.gha_app_object_id != null && var.gha_app_object_id != "") ? 1 : 0
+  count = (
+    local.want_app_service
+    && var.gha_app_object_id != null && var.gha_app_object_id != ""
+    && "${var.deployment}-${var.environment}" == var.gha_app_target
+  ) ? 1 : 0
 
   scope                = module.app_service[0].app_id
   role_definition_name = "Website Contributor"

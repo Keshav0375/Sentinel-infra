@@ -103,6 +103,16 @@ variable "gha_app_object_id" {
   }
 }
 
+# gha-app federates exactly one GitHub environment, sentinel-dev, so it can
+# only ever be meant to deploy ONE deployment. Without this, every deployment
+# with an App Service would grant it Website Contributor: one more app the
+# pipeline identity can overwrite, for no job that could use it.
+variable "gha_app_target" {
+  description = "The one `<deployment>-<environment>` whose App Service gha-app may deploy to. Only that workspace creates the Website Contributor grant. Matches the sentinel-dev GitHub environment gha-app federates."
+  type        = string
+  default     = "sentinel-dev"
+}
+
 variable "state_storage_account" {
   description = "State storage account, used by the deployment layer's remote-state lookup of the platform. Must match backend.tf, which cannot interpolate variables."
   type        = string
