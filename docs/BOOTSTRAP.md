@@ -62,7 +62,7 @@ providers. Idempotent — safe to re-run as a health check.
 The storage account name derives from the **subscription**, not from a deployment — it exists
 before any deployment does. It must match `backend.tf`, which cannot interpolate variables.
 
-## Step 2 — The three CI identities
+## Step 2 — The four CI identities
 
 ```bash
 ./scripts/bootstrap-identities.sh
@@ -70,9 +70,15 @@ before any deployment does. It must match `backend.tf`, which cannot interpolate
 
 | Identity | Rights | Federated subjects | Reachable from a PR? |
 |---|---|---|---|
-| `gha-plan` | Reader + blob **Reader** | `pull_request`, `environment:plan` | yes — and it can change nothing |
+| `gha-plan` | Reader + blob **Reader** | `environment:plan` (the `pull_request` subject is retired) | **no** — and it can change nothing |
 | `gha-deploy` | Contributor + RBAC Admin + AKS Cluster Admin | `environment:production`, `environment:destroy` | **no** |
 | `gha-ops` | custom 10-action start/stop role | `environment:ops` | **no** |
+| `gha-app` | **none** here; Website Contributor on one App Service, from the deployment layer | `Sentinel-deployment` `environment:sentinel-dev` | **no** |
+
+`gha-app` is the *app* pipeline's identity (decision 2026-10-05, R7). Sentinel-deployment
+deploys code on every merge to a repo whose branches are broken on purpose, so it gets its own
+identity rather than a credential on `gha-deploy`, which can empty the subscription. It lives in
+`rg-sentinel-bootstrap` so its client ID survives every destroy/recreate of a deployment.
 
 **The protection is the token, not a rule.** A job declaring `environment: X` receives the OIDC
 subject `repo:<owner>/<repo>:environment:X` instead of the branch form, and GitHub will not mint
@@ -84,9 +90,10 @@ construction* — there is nothing to misconfigure.
 unlocked plan racing an apply can produce a stale plan — acceptable, since plans are advisory
 and applies are dispatch-only.
 
-The script prints three client IDs. Set them as repository **variables**, not secrets — under
-OIDC these are public identifiers, and masking them turns `AADSTS700213: subject ***` into an
-unreadable failure.
+The script prints three client IDs and `gha-app`'s **principal** ID. Set them as repository
+**variables**, not secrets — under OIDC these are public identifiers, and masking them turns
+`AADSTS700213: subject ***` into an unreadable failure. `gha-app`'s *client* ID does not go
+here: it belongs to Sentinel-deployment and is pushed in step 9.
 
 ## Step 3 — GitHub repository configuration
 
@@ -101,6 +108,7 @@ unreadable failure.
 | variable | `PG_ADMIN_OBJECT_ID` | `az ad signed-in-user show --query id -o tsv` |
 | variable | `PG_ADMIN_PRINCIPAL_NAME` | your UPN |
 | variable | `KV_ADMIN_OBJECT_ID` | same as `PG_ADMIN_OBJECT_ID` today, separate on purpose |
+| variable | `GHA_APP_OBJECT_ID` | `gha-app`'s principal ID, from step 2 (see below) |
 | variable | `AZURE_IDENTITY_TENANT_ID` | `eae0d3c6-af22-4b70-ad3b-12d625a06139` |
 
 Also create four GitHub **environments**: `plan`, `production`, `destroy`, `ops`. Put a required
@@ -109,6 +117,17 @@ reviewer on `destroy`; the others need none.
 > ⚠️ **An unset variable is not an error.** GitHub renders a missing `vars.X` as the empty
 > string, so the workflow runs `-var="kv_admin_object_id="` and Terraform fails somewhere
 > downstream about a role assignment. If a run fails oddly, check this table first.
+
+`GHA_APP_OBJECT_ID` is the principal (object) ID, not the client ID — the deployment layer
+assigns it a role:
+
+```bash
+gh variable set GHA_APP_OBJECT_ID --repo Keshav0375/Sentinel-infra \
+  --body "$(az identity show -g rg-sentinel-bootstrap -n gha-app --query principalId -o tsv)"
+```
+
+Unset is tolerated rather than fatal: the plan skips the App Service grant, and the app
+pipeline's deploy step is what fails, with `AuthorizationFailed`.
 
 There is no `AZURE_CLIENT_SECRET` (OIDC removes it), no `DB_PASSWORD` (Postgres is Entra-only),
 and no `GITHUB_`-prefixed name (GitHub reserves that prefix outright).
@@ -276,6 +295,49 @@ az keyvault secret set --vault-name <kv> --name teams-webhook-url   --value <...
 
 Set `--expires` on every one. The rotation Function watches `SecretNearExpiry`; a secret with no
 expiry never fires it, so the rotation path silently does nothing.
+
+## Step 9 — The app pipeline (Sentinel-deployment)
+
+Sentinel-deployment's pipeline deploys the target app as `gha-app` and records each deploy in
+Postgres. Three things make that possible, and they run in this order — each needs the one
+before it:
+
+1. **Bootstrap** — `scripts/bootstrap-identities.sh` (step 2) has created `gha-app`, and
+   `GHA_APP_OBJECT_ID` is set (step 3).
+2. **Apply** the deployment (step 7) with the `app_service` and `database` components. This
+   grants `gha-app` **Website Contributor on that App Service only**, and produces the outputs
+   the next two steps read: `app_name`, `app_url`, `deployment_resource_group`,
+   `database_name`, `database_host`.
+3. **Grant database access** — you, as the server's Entra admin:
+
+   ```bash
+   az login   # the school tenant; see the az context hazard above
+   bash scripts/grant-db-access.sh --deployment sentinel --environment dev
+   ```
+
+   Terraform cannot do this: a role *inside* a database has no resource (decision 2026-10-05,
+   R12). The script creates `gha-app` as a database principal — not an admin — and grants
+   CONNECT and schema USAGE. `INSERT, SELECT` on `deployments` waits for that table: backend
+   phase 1's migration creates it, and until then the script prints a NOTE and the pipeline's
+   record stage fails visibly. **Re-run the script after that migration**, and after any
+   recreate of the database. It is idempotent.
+4. **Push the pipeline's configuration**:
+
+   ```bash
+   bash scripts/push-deploy-config.sh --dry-run   # check every value first
+   bash scripts/push-deploy-config.sh
+   ```
+
+   Creates the `sentinel-dev` environment on Sentinel-deployment if missing, sets secrets
+   `AZURE_CLIENT_ID` (gha-app), `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `DD_API_KEY` (from
+   `../Sentinel/.env`; `--env-file` for another), and variables `AZURE_RG`, `APP_NAME`,
+   `DEPLOYED_APP_URL`, `PG_HOST`, `PG_DATABASE`, `PG_USER=gha-app`, `DD_SITE`. Every value is
+   deterministic, so this runs once — again only if `gha-app` is rebuilt or the Datadog key
+   rotates.
+
+`sentinel-dev` is fixed, not a choice: `gha-app` federates exactly
+`repo:Keshav0375/Sentinel-deployment:environment:sentinel-dev`, and a job in any other
+environment cannot get a token.
 
 ---
 

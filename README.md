@@ -94,13 +94,15 @@ construction. A deployment can *use* the cluster and *cannot* change it.
 | Script | Runs as | What it is for |
 |---|---|---|
 | `bootstrap-state.sh` | you, as Owner | one-time: the state storage account |
-| `bootstrap-identities.sh` | you, as Owner | one-time: the three UAMIs, their roles, their federated credentials |
+| `bootstrap-identities.sh` | you, as Owner | one-time: the three UAMIs, their roles, their federated credentials — plus `gha-app` for Sentinel-deployment |
 | `set-gh-secrets.sh` | you | pushes repo variables/secrets to the three repos |
 | `preflight.sh` | `gha-plan` or `gha-deploy` | the checks a `plan` structurally cannot make |
 | `lifecycle.sh` | `gha-deploy` | plan / apply / destroy, **in dependency order** |
 | `seed-vault.sh` | `gha-deploy` | fills the empty vault over the data plane, post-apply |
 | `verify-estate.sh` | `gha-plan` | asks Azure what actually survived |
 | `pause.sh` | `gha-ops` | stop and start compute without deleting anything |
+| `grant-db-access.sh` | you, as Postgres Entra admin | makes `gha-app` a database principal; re-run after backend phase 1's migration |
+| `push-deploy-config.sh` | you | pushes the app pipeline's secrets and variables to Sentinel-deployment's `sentinel-dev` environment |
 
 ---
 
@@ -177,6 +179,11 @@ destruction alone. `gha-ops` runs the most frequent operation in the repo — pa
 therefore must not be the identity that can delete the subscription. Its role
 ([`.ops-role.json`](.ops-role.json)) lists ten explicit actions with no wildcard anywhere: a
 property you can test rather than trust.
+
+A fourth identity, `gha-app`, belongs to **Sentinel-deployment**, not to this repo's workflows.
+It federates one subject (`environment:sentinel-dev` on that repo), holds no subscription role,
+and gets exactly one grant from the deployment layer: Website Contributor on that deployment's
+App Service. See [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) step 9.
 
 > **`identity.tf` is deleted, not disabled.** Terraform *configures* a declared provider whether
 > or not any of its resources are planned — `count = 0` on everything is not enough. An
