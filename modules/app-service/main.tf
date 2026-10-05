@@ -35,6 +35,15 @@ resource "azurerm_linux_web_app" "dummy_api" {
   resource_group_name = var.resource_group_name
   service_plan_id     = azurerm_service_plan.deployment.id
 
+  # No username/password deployment credentials. The app pipeline deploys as
+  # gha-app over OIDC: `az webapp deploy` (CLI >= 2.48.1) falls back to Entra
+  # auth against Kudu when SCM basic auth is off (Microsoft Learn, "Disable
+  # basic authentication for deployment"), authorised by gha-app's Website
+  # Contributor grant. With basic auth on, anyone holding the publish profile
+  # could deploy around that grant, and around the main-only environment.
+  ftp_publish_basic_authentication_enabled       = false
+  webdeploy_publish_basic_authentication_enabled = false
+
   site_config {
     # Hard F1 constraints, not preferences: the tier rejects Always On (and
     # azurerm defaults it to true → apply fails without this) and only offers a
