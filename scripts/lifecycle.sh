@@ -118,6 +118,7 @@ TF_COMMON=(
   -var "pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}"
   -var "kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}"
   -var "kv_seeder_object_id=${TF_KV_SEEDER_OBJECT_ID:-}"
+  -var "gha_app_object_id=${TF_GHA_APP_OBJECT_ID:-}"
 )
 
 # ── Workspace helpers ────────────────────────────────────────────────────────

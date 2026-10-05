@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # App Service — the TARGET app (architecture/infra.md §3.6).
 #
-# Hosts dummy-api-0375, the deliberately-breakable FastAPI app from the
+# Hosts sentinel-watchtower, the deliberately-breakable FastAPI app from the
 # Sentinel-deployment repo. Its deploys and failures are what generate the real
 # Datadog signal the whole incident pipeline runs on. Terraform provisions the
 # plan + empty web app; code arrives via ci_app_deployment.yml (deployment
@@ -26,11 +26,33 @@ resource "azurerm_service_plan" "deployment" {
   sku_name            = "F1" # always-free tier: 60 CPU-min/day, 1 GB — the real ceiling for the 30-scenario runs
 }
 
+# The `dummy_api` address is historical: renaming it would destroy and recreate
+# the web app in every deployment's state for a cosmetic gain. The app it hosts
+# is sentinel-watchtower; the resource is named from var.app_name.
 resource "azurerm_linux_web_app" "dummy_api" {
   name                = var.app_name
   location            = var.location
   resource_group_name = var.resource_group_name
   service_plan_id     = azurerm_service_plan.deployment.id
+
+  # No username/password deployment credentials. The app pipeline deploys as
+  # gha-app over OIDC: `az webapp deploy` (CLI >= 2.48.1) falls back to Entra
+  # auth against Kudu when SCM basic auth is off (Microsoft Learn, "Disable
+  # basic authentication for deployment"), authorised by gha-app's Website
+  # Contributor grant. With basic auth on, anyone holding the publish profile
+  # could deploy around that grant, and around the main-only environment.
+  #
+  # ACCEPTED, recorded (PR #16 review): Website Contributor includes
+  # Microsoft.Web/sites/basicPublishingCredentialsPolicies/write, so a stolen
+  # gha-app token could turn basic auth back on. Accepted because:
+  #   - the token can only be minted by a workflow run on main (sentinel-dev's
+  #     main-only branch policy, plus main's PR-required protection);
+  #   - the next apply reverts the drift, since these two flags are managed here;
+  #   - a custom role without that action needs a role definition, which only
+  #     an Owner can create, and the pipeline identities hold no Owner.
+  # Revisit if gha-app is ever granted on a second deployment.
+  ftp_publish_basic_authentication_enabled       = false
+  webdeploy_publish_basic_authentication_enabled = false
 
   site_config {
     # Hard F1 constraints, not preferences: the tier rejects Always On (and
@@ -49,7 +71,7 @@ resource "azurerm_linux_web_app" "dummy_api" {
 
   app_settings = {
     "APP_VERSION"                    = "initial"
-    "DD_SERVICE"                     = "dummy-api-0375"
+    "DD_SERVICE"                     = "sentinel-watchtower" # logical service name (decision 2026-10-04 D1), NOT the resource name
     "DD_ENV"                         = "dev"
     "SCM_DO_BUILD_DURING_DEPLOYMENT" = "true" # Oryx builds requirements.txt on zip deploy
   }

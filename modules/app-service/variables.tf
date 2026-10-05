@@ -9,7 +9,7 @@ variable "location" {
 }
 
 variable "app_name" {
-  description = "Globally unique web app name — becomes <name>.azurewebsites.net. The unsuffixed dummy-api was already taken by another tenant (0375 convention)."
+  description = "Globally unique Azure resource name (app-<dep>-<env>-<uid> from modules/naming) — becomes <name>.azurewebsites.net. Not the Datadog service name, which is sentinel-watchtower."
   type        = string
 
   validation {

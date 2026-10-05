@@ -70,7 +70,9 @@ on:
         default: plan
         options: [plan, apply, destroy]
       scope:
-        description: 'deployment = one isolated deployment · platform = the shared cluster/registry/database · all = both, in dependency order'
+        description: >-
+          deployment = one isolated deployment · platform = the shared cluster/registry/database ·
+          all = both, in dependency order
         type: choice
         required: true
         default: deployment
@@ -86,7 +88,9 @@ on:
         required: false
         default: dev
       confirm:
-        description: 'DESTROY ONLY. Type what matches the scope: deployment -> the deployment name · platform -> platform · all -> destroy-everything'
+        description: >-
+          DESTROY ONLY. Type what matches the scope: deployment -> the deployment name ·
+          platform -> platform · all -> destroy-everything
         type: string
         required: false
         default: ''
@@ -96,7 +100,9 @@ on:
         required: false
         default: true
       target:
-        description: 'Single resource address for -target. PLAN ONLY — a partial apply or destroy leaves state no plan agrees with.'
+        description: >-
+          Single resource address for -target. PLAN ONLY — a partial apply or destroy leaves
+          state no plan agrees with.
         type: string
         required: false
         default: ''
@@ -338,6 +344,7 @@ jobs:
           TF_PG_ADMIN_OBJECT_ID: ${{ vars.PG_ADMIN_OBJECT_ID }}
           TF_PG_ADMIN_PRINCIPAL_NAME: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
           TF_KV_ADMIN_OBJECT_ID: ${{ vars.KV_ADMIN_OBJECT_ID }}
+          TF_GHA_APP_OBJECT_ID: ${{ vars.GHA_APP_OBJECT_ID }}
           TF_KV_SEEDER_OBJECT_ID: ${{ steps.seeder.outputs.principal_id }}
           ACTION: ${{ inputs.action }}
           SCOPE: ${{ inputs.scope }}

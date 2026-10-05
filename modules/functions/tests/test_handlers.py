@@ -85,16 +85,16 @@ class BridgeTests(unittest.TestCase):
         return req, json.loads(req.data)
 
     def test_deploy_failure_classified_from_tags_list(self):
-        _, body = self._run({"tags": ["deploy_status:failed", "service:dummy-api"], "title": "x"})
+        _, body = self._run({"tags": ["deploy_status:failed", "service:sentinel-watchtower"], "title": "x"})
         self.assertEqual(body["client_payload"]["signal_type"], "deploy_failure")
 
     def test_runtime_error_is_the_default(self):
-        _, body = self._run({"tags": ["service:dummy-api"], "title": "5xx spike"})
+        _, body = self._run({"tags": ["service:sentinel-watchtower"], "title": "5xx spike"})
         self.assertEqual(body["client_payload"]["signal_type"], "runtime_error")
 
     def test_classifier_reads_title_when_tags_missing(self):
         # Datadog webhook bodies vary: no tags key at all, marker in the title.
-        _, body = self._run({"title": "ALERT deploy_status:failed on dummy-api"})
+        _, body = self._run({"title": "ALERT deploy_status:failed on sentinel-watchtower"})
         self.assertEqual(body["client_payload"]["signal_type"], "deploy_failure")
 
     def test_payload_nests_event_under_one_key(self):
@@ -110,7 +110,7 @@ class BridgeTests(unittest.TestCase):
     def test_tags_as_comma_joined_string(self):
         # Datadog's webhook template renders $TAGS as ONE comma-joined string —
         # the shape that broke the original " ".join (per-character iteration).
-        _, body = self._run({"tags": "deploy_status:failed,service:dummy-api", "title": "x"})
+        _, body = self._run({"tags": "deploy_status:failed,service:sentinel-watchtower", "title": "x"})
         self.assertEqual(body["client_payload"]["signal_type"], "deploy_failure")
 
     def test_tags_null_does_not_crash(self):

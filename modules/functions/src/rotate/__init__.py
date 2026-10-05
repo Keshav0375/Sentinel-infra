@@ -23,6 +23,10 @@ import urllib.request
 
 import azure.functions as func
 
+# A named logger rather than the root one: it still propagates to the root
+# handler the Functions worker installs, and the record carries its origin.
+log = logging.getLogger(__name__)
+
 ROTATABLE = {"anthropic-api-key", "openai-api-key"}
 
 
@@ -33,12 +37,12 @@ def _teams(message: str) -> None:
     # seeded (B8), or the app not yet restarted after the grant). urlopen would
     # die on it with "unknown url type" and kill the escalation path.
     if url.startswith("@Microsoft.KeyVault"):
-        logging.warning("rotate: TEAMS_WEBHOOK_URL is an unresolved KV reference — grant/seed/restart missing. Wanted to say: %s", message)
+        log.warning("rotate: TEAMS_WEBHOOK_URL is an unresolved KV reference — grant/seed/restart missing. Wanted to say: %s", message)
         return
     if not url:
         # B8 open: no webhook seeded yet. Log loudly rather than crash — the
         # SecretNearExpiry event will re-fire on its schedule.
-        logging.warning("rotate: TEAMS_WEBHOOK_URL empty (B8?) — wanted to say: %s", message)
+        log.warning("rotate: TEAMS_WEBHOOK_URL empty (B8?) — wanted to say: %s", message)
         return
     req = urllib.request.Request(
         url,
@@ -47,13 +51,13 @@ def _teams(message: str) -> None:
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
-        logging.info("rotate: teams notified (HTTP %s)", resp.status)
+        log.info("rotate: teams notified (HTTP %s)", resp.status)
 
 
 def _mint_anthropic(admin_key: str) -> str:
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/organizations/api_keys",
-        data=json.dumps({"name": f"sentinel-rotated-{datetime.date.today().isoformat()}"}).encode(),
+        data=json.dumps({"name": f"sentinel-rotated-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}"}).encode(),
         headers={
             "x-api-key": admin_key,
             "anthropic-version": "2023-06-01",
@@ -70,7 +74,7 @@ def main(event: func.EventGridEvent) -> None:
     secret_name = data.get("ObjectName", "")
 
     if secret_name not in ROTATABLE:
-        logging.info("rotate: ignoring SecretNearExpiry for %r (not an LLM key)", secret_name)
+        log.info("rotate: ignoring SecretNearExpiry for %r (not an LLM key)", secret_name)
         return
 
     admin_key = os.environ.get("ANTHROPIC_ADMIN_KEY", "")
@@ -87,7 +91,7 @@ def main(event: func.EventGridEvent) -> None:
             new_value,
             expires_on=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=90),
         )
-        logging.info("rotate: %s rotated, new version set with +90d expiry", secret_name)
+        log.info("rotate: %s rotated, new version set with +90d expiry", secret_name)
         # Best-effort AFTER the write: if Teams fails here and the exception
         # escaped, Event Grid would re-deliver and the handler would MINT AGAIN
         # — up to 30 extra key versions for one notification hiccup. The secret
@@ -95,7 +99,7 @@ def main(event: func.EventGridEvent) -> None:
         try:
             _teams(f"Sentinel: `{secret_name}` rotated automatically (new version, +90d).")
         except Exception:
-            logging.exception("rotate: rotated OK but the Teams notification failed (ignored)")
+            log.exception("rotate: rotated OK but the Teams notification failed (ignored)")
     else:
         _teams(
             f"Sentinel: `{secret_name}` expires in ~30 days and cannot be auto-rotated. "
