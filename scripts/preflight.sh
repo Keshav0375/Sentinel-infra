@@ -142,22 +142,44 @@ if [ "${MODE}" = "apply" ] && [ -n "${DEPLOYMENT}" ] && [ -n "${ENVIRONMENT}" ];
   kv="kv-${DEPLOYMENT}-${ENVIRONMENT}-${uid}"
   st="st${DEPLOYMENT}${ENVIRONMENT}${uid}"
 
+  # ── A name WE already hold is a re-apply, not a conflict ─────────────────
+  # Every name check below asks "is it free?", and after a partially failed
+  # apply the honest answer is "no — you made it". On 2026-10-06 run
+  # 37402021269 was refused because stsentineldevb136 existed in
+  # rg-sentinel-dev-func-cc, created by the failed run before it. Terraform
+  # would have adopted it from state and carried on. So each check first asks
+  # whether the holder is THIS subscription, and only a name held elsewhere
+  # fails.
+  #
+  # `ours <az list … --query …>` prints the first match, or nothing.
+  ours() { "$@" -o tsv 2>/dev/null | nocr | head -n 1; }
+
   # A destroyed vault holds its name for 7 days. Without purge, destroy →
   # recreate of the same deployment fails on a vault nobody can see — which is
-  # the exact cycle this platform exists to support.
-  if az keyvault list-deleted --query "[?name=='${kv}'].name" -o tsv 2>/dev/null | grep -q .; then
+  # the exact cycle this platform exists to support. A LIVE vault of this name
+  # in this subscription is the deployment's own.
+  kv_rg="$(ours az keyvault list --query "[?name=='${kv}'].resourceGroup")"
+  if [ -n "${kv_rg}" ]; then
+    pass "key vault (${kv}) already ours in ${kv_rg}, re-apply"
+  elif az keyvault list-deleted --query "[?name=='${kv}'].name" -o tsv 2>/dev/null | grep -q .; then
     fail "key vault name free (${kv})" "az keyvault purge --name ${kv} --location ${LOCATION}"
   else
     pass "key vault name free (${kv})"
   fi
 
   # Globally unique across every Azure tenant, and a taken name fails with a
-  # message that does not say "taken".
+  # message that does not say "taken". check-name answers `false` for our OWN
+  # account too, so ownership is asked before blaming another tenant.
   avail="$(az storage account check-name --name "${st}" --query nameAvailable -o tsv 2>/dev/null | nocr)"
+  st_rg="$(ours az storage account list --query "[?name=='${st}'].resourceGroup")"
   if [ "${avail}" = "true" ]; then
     pass "storage account name free (${st})"
-  else
+  elif [ -n "${st_rg}" ]; then
+    pass "storage account (${st}) already ours in ${st_rg}, re-apply"
+  elif [ "${avail}" = "false" ]; then
     fail "storage account name free (${st})" "another tenant holds it — change the deployment name"
+  else
+    fail "storage account name free (${st})" "could not check — az storage account check-name --name ${st}"
   fi
 
   # ── App Service F1 quota, by live probe ───────────────────────────────────
@@ -196,6 +218,16 @@ if [ "${MODE}" = "apply" ] && [ -n "${DEPLOYMENT}" ] && [ -n "${ENVIRONMENT}" ];
     az appservice plan delete -n "${probe_plan}" -g "${probe_rg}" --yes -o none 2>/dev/null || true
   }
 
+  # This deployment's own F1 plan, if a previous apply already made one — the
+  # app name is global (uid-suffixed), so it identifies the plan exactly.
+  app="app-${DEPLOYMENT}-${ENVIRONMENT}-${uid}"
+  own_f1=""
+  app_plan="$(ours az webapp list --query "[?name=='${app}'].serverFarmId")"
+  if [ -n "${app_plan}" ] \
+     && [ "$(az appservice plan show --ids "${app_plan}" --query sku.name -o tsv 2>/dev/null | nocr)" = "F1" ]; then
+    own_f1="${app_plan}"
+  fi
+
   if az group show -n "${probe_rg}" -o none 2>/dev/null; then
     drop_probe                 # clear a leak from a cancelled run, then arm the trap
     trap drop_probe EXIT
@@ -204,6 +236,10 @@ if [ "${MODE}" = "apply" ] && [ -n "${DEPLOYMENT}" ] && [ -n "${ENVIRONMENT}" ];
                       --name "${probe_plan}" --resource-group "${probe_rg}" \
                       --location "${LOCATION}" --sku F1 --is-linux -o none 2>&1)"; then
       pass "App Service F1 quota (probe created)"
+    elif printf '%s' "${probe_err}" | grep -qi 'quota' && [ -n "${own_f1}" ]; then
+      # The slot is taken by this deployment's OWN plan (a partial apply made
+      # it). A re-apply adopts that plan and needs no new slot.
+      pass "App Service F1 quota (${app} already holds one, re-apply)"
     elif printf '%s' "${probe_err}" | grep -qi 'quota'; then
       fail "App Service F1 quota" "limit is 0 — raise it in Portal > Subscription > Usage + quotas (Microsoft.Web, ${LOCATION}), or set the App Service SKU to a paid tier"
     else
