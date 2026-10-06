@@ -154,17 +154,30 @@ if [ "${MODE}" = "apply" ] && [ -n "${DEPLOYMENT}" ] && [ -n "${ENVIRONMENT}" ];
   # `ours <az list … --query …>` prints the first match, or nothing.
   ours() { "$@" -o tsv 2>/dev/null | nocr | head -n 1; }
 
-  # A destroyed vault holds its name for 7 days. Without purge, destroy →
-  # recreate of the same deployment fails on a vault nobody can see — which is
-  # the exact cycle this platform exists to support. A LIVE vault of this name
-  # in this subscription is the deployment's own.
+  # Vault names are global too (vault.azure.net). In order:
+  #   live in this subscription   -> the deployment's own: re-apply
+  #   soft-deleted here           -> a destroyed vault holds its name for 7
+  #                                  days; without a purge, destroy -> recreate
+  #                                  of the same deployment fails on a vault
+  #                                  nobody can see
+  #   otherwise                   -> ask the global namespace. Microsoft.KeyVault
+  #                                  checkNameAvailability is a POST */action,
+  #                                  which is why this is apply-mode only.
   kv_rg="$(ours az keyvault list --query "[?name=='${kv}'].resourceGroup")"
   if [ -n "${kv_rg}" ]; then
     pass "key vault (${kv}) already ours in ${kv_rg}, re-apply"
   elif az keyvault list-deleted --query "[?name=='${kv}'].name" -o tsv 2>/dev/null | grep -q .; then
     fail "key vault name free (${kv})" "az keyvault purge --name ${kv} --location ${LOCATION}"
   else
-    pass "key vault name free (${kv})"
+    kv_avail="$(az rest --method post \
+      --url "https://management.azure.com/subscriptions/${sub}/providers/Microsoft.KeyVault/checkNameAvailability?api-version=2023-07-01" \
+      --body "{\"name\":\"${kv}\",\"type\":\"Microsoft.KeyVault/vaults\"}" \
+      --query nameAvailable -o tsv 2>/dev/null | nocr)"
+    case "${kv_avail}" in
+      true)  pass "key vault name free (${kv})" ;;
+      false) fail "key vault name free (${kv})" "another tenant holds it — change the deployment name" ;;
+      *)     fail "key vault name free (${kv})" "could not check — az keyvault check-name --name ${kv}" ;;
+    esac
   fi
 
   # Globally unique across every Azure tenant, and a taken name fails with a
