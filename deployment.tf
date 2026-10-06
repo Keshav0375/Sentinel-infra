@@ -178,13 +178,15 @@ resource "azurerm_user_assigned_identity" "backend" {
 }
 
 resource "azurerm_federated_identity_credential" "backend" {
-  count               = local.c_backend_identity
-  name                = "${module.naming.names.kubernetes_namespace}-backend"
-  resource_group_name = azurerm_resource_group.deployment[0].name
-  parent_id           = azurerm_user_assigned_identity.backend[0].id
-  audience            = ["api://AzureADTokenExchange"]
-  issuer              = local.platform.oidc_issuer_url
-  subject             = "system:serviceaccount:${module.naming.names.kubernetes_namespace}:sentinel-backend"
+  count = local.c_backend_identity
+  name  = "${module.naming.names.kubernetes_namespace}-backend"
+  # azurerm 4.81 deprecates `resource_group_name` (unused) and renames
+  # `parent_id` to this. Both old arguments are Optional+Computed and Read sets
+  # all three from the resource ID, so the switch plans as no change.
+  user_assigned_identity_id = azurerm_user_assigned_identity.backend[0].id
+  audience                  = ["api://AzureADTokenExchange"]
+  issuer                    = local.platform.oidc_issuer_url
+  subject                   = "system:serviceaccount:${module.naming.names.kubernetes_namespace}:sentinel-backend"
 }
 
 # ── Key Vault ─────────────────────────────────────────────────────────────────
