@@ -54,14 +54,28 @@ locals {
 #
 # ⚠️ kubelogin must be on PATH. GitHub runners do not ship it; the workflows add
 # `azure/use-kubelogin@v1`.
+#
+# ⚠️ `--login azurecli` borrows the az CLI's session, and in CI that session
+# rests on a GitHub OIDC assertion that expires within MINUTES of azure/login.
+# The first namespace call asks for a token for a resource az has not minted
+# one for yet (the AKS server app below), so it needs a live assertion. On
+# 2026-10-06 (run 37399746578) the platform apply took ~10 min and this failed
+# as `exec: executable kubelogin failed with exit code 1`. The azurerm provider
+# never hits this — ARM_USE_OIDC fetches its own fresh assertions.
+#
+# So lifecycle.sh runs scripts/az-refresh.sh before every layer, and the exec
+# goes through scripts/kubelogin.sh, which keeps kubelogin's stderr (Terraform
+# otherwise drops it; lifecycle.sh prints it on failure) and, in CI, refreshes
+# and retries once. Locally both are pass-throughs to your own `az login`.
 provider "kubernetes" {
   host                   = try(local.kube.host, "")
   cluster_ca_certificate = try(base64decode(local.kube.cluster_ca_certificate), "")
 
   exec {
     api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "kubelogin"
+    command     = "bash"
     args = [
+      "${abspath(path.root)}/scripts/kubelogin.sh",
       "get-token",
       "--login", "azurecli",
       # The fixed AKS AAD server application ID. Not a Sentinel value — it is the

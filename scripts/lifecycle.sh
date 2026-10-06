@@ -121,6 +121,29 @@ TF_COMMON=(
   -var "gha_app_object_id=${TF_GHA_APP_OBJECT_ID:-}"
 )
 
+# ── A fresh az session before every long phase ──────────────────────────────
+# az's CI session rests on a GitHub OIDC assertion that expires minutes after
+# azure/login; kubelogin (via namespace.tf) and the vault purge below both lean
+# on az long after that. Terraform itself is unaffected (ARM_USE_OIDC). A no-op
+# outside GitHub Actions — see az-refresh.sh.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+refresh_az() { bash "${SCRIPT_DIR}/az-refresh.sh"; }
+
+# kubelogin's stderr, which Terraform would otherwise drop — scripts/kubelogin.sh
+# appends it here, and run_layer prints it when Terraform fails.
+if [ -z "${SENTINEL_KUBELOGIN_LOG:-}" ]; then
+  SENTINEL_KUBELOGIN_LOG="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/kubelogin.XXXXXX")"
+  trap 'rm -f "${SENTINEL_KUBELOGIN_LOG}"' EXIT
+fi
+export SENTINEL_KUBELOGIN_LOG
+
+show_kubelogin_log() {
+  [ -s "${SENTINEL_KUBELOGIN_LOG}" ] || return 0
+  echo "──── kubelogin stderr (the kubernetes provider does not show it) ────" >&2
+  cat "${SENTINEL_KUBELOGIN_LOG}" >&2
+  echo "──── end kubelogin stderr ────" >&2
+}
+
 # ── Workspace helpers ────────────────────────────────────────────────────────
 
 # `terraform workspace list` marks the current workspace with '*' and indents
@@ -205,9 +228,19 @@ run_layer() {
   esac
   if [ -n "${TARGET}" ]; then args+=("-target=${TARGET}"); fi
 
-  terraform "${verb}" "${args[@]}"
+  # Immediately before Terraform, not once per script: the platform layer alone
+  # can outlive the assertion the previous refresh was minted from.
+  refresh_az
+  : > "${SENTINEL_KUBELOGIN_LOG}"
+  if ! terraform "${verb}" "${args[@]}"; then
+    show_kubelogin_log
+    return 1
+  fi
 
   if [ "${ACTION}" != "destroy" ]; then return 0; fi
+
+  # The destroy above can run for many minutes; the purge sweep is az.
+  refresh_az
 
   # ── Post-destroy: purge, then PROVE the workspace is empty ────────────────
   # The provider purges a vault on destroy, so this is the sweep for one left

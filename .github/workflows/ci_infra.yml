@@ -242,6 +242,12 @@ jobs:
         with:
           kubelogin-version: 'v0.1.3'
 
+      # This az session does NOT last the job. azure/login mints it from a
+      # GitHub OIDC assertion that expires within minutes; az keeps working for
+      # ARM (a token minted at login) but cannot reach a NEW resource — AKS for
+      # kubelogin, the Key Vault data plane for seeding — once the assertion is
+      # stale. lifecycle.sh and the seed step therefore re-log in with
+      # scripts/az-refresh.sh first. Run 37399746578 is the failure.
       - name: Log in to Azure
         uses: azure/login@v2
         with:
@@ -384,6 +390,10 @@ jobs:
       - name: Seed the vault
         if: inputs.action == 'apply' && inputs.scope != 'platform' && inputs.seed_secrets
         env:
+          # For az-refresh.sh only: the identity to re-log az in as.
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           VAULT: ${{ steps.vault.outputs.name }}
           DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
           DATADOG_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
@@ -396,6 +406,10 @@ jobs:
             echo "::warning::no Key Vault in this deployment — nothing to seed"
             exit 0
           fi
+          # Both applies have run since azure/login, and the Key Vault data
+          # plane is a resource az has not yet minted a token for — it needs a
+          # live OIDC assertion, which the one from login no longer is.
+          bash ./scripts/az-refresh.sh
           bash ./scripts/seed-vault.sh --vault "${VAULT}"
 
       - name: Summary
