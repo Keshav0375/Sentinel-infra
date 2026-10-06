@@ -26,9 +26,16 @@
 #
 # ── The token is never printed ───────────────────────────────────────────────
 # It is registered with ::add-mask:: before it is used anywhere, nothing here
-# runs under `set -x`, and az's own output is discarded. It does appear in
-# az's argv for the duration of the login — exactly as azure/login puts it
-# there — on a runner that is torn down with the job.
+# runs under `set -x`, az's stdout is discarded and its stderr is redacted
+# before it is shown. The REQUEST token GitHub hands the job travels to curl on
+# stdin, never on argv. The OIDC token itself does sit in az's argv for the
+# length of the login — exactly as azure/login puts it there — on a runner that
+# is torn down with the job.
+#
+# ── Retried, with a NEW token each time ──────────────────────────────────────
+# This runs before Terraform starts; a transient AAD error here would end a run
+# that has not done anything yet. Three attempts, each with a freshly minted
+# assertion (an expired or replayed one is precisely the failure being fixed).
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -47,28 +54,64 @@ for required in ARM_CLIENT_ID ARM_TENANT_ID ARM_SUBSCRIPTION_ID; do
   fi
 done
 
-# `audience` is the value Entra's federated credentials are configured for —
-# the same one azure/login requests.
-response="$(curl -sSf --retry 3 --max-time 30 \
-  -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange")" || {
-  echo "::error::az-refresh: GitHub refused an OIDC token. Does the job grant 'id-token: write'?" >&2
-  exit 1
-}
-token="$(jq -r '.value // empty' <<< "${response}")"
-unset response
-if [ -z "${token}" ]; then
-  echo "::error::az-refresh: the OIDC response carried no token." >&2
+# A logged-in az that is NOT the step's identity means the env and the login
+# disagree about who this job is. Re-logging in would silently switch it, so
+# refuse instead.
+current="$(az account show --query user.name -o tsv 2>/dev/null | tr -d '\r' || true)"
+if [ -n "${current}" ] \
+   && [ "$(printf '%s' "${current}" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "${ARM_CLIENT_ID}" | tr '[:upper:]' '[:lower:]')" ]; then
+  echo "::error::az-refresh: az is logged in as ${current}, but ARM_CLIENT_ID is ${ARM_CLIENT_ID}." >&2
+  echo "::error::Refusing to switch identity mid-job — fix the step's env: block." >&2
   exit 1
 fi
-echo "::add-mask::${token}"
 
-az login --service-principal \
-  --username "${ARM_CLIENT_ID}" \
-  --tenant "${ARM_TENANT_ID}" \
-  --federated-token "${token}" \
-  --allow-no-subscriptions -o none
-unset token
-az account set --subscription "${ARM_SUBSCRIPTION_ID}"
+# Strip anything JWT-shaped and any --federated-token value from text that is
+# about to be shown.
+redact() {
+  sed -E -e 's/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/<redacted-jwt>/g' \
+         -e 's/(--federated-token[= ]+)[^ ]+/\1<redacted>/g'
+}
 
-echo "az session refreshed from a new GitHub OIDC token"
+# `audience` is the value Entra's federated credentials are configured for —
+# the same one azure/login requests. The request token reaches curl through
+# stdin (`-H @-`), so it never appears in a process listing.
+mint_token() {
+  local response
+  response="$(printf 'Authorization: Bearer %s\n' "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+    | curl -sSf --retry 3 --max-time 30 -H @- \
+        "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange")" || {
+    echo "::error::az-refresh: GitHub refused an OIDC token. Does the job grant 'id-token: write'?" >&2
+    return 1
+  }
+  jq -r '.value // empty' <<< "${response}"
+}
+
+attempts=3
+for attempt in $(seq 1 "${attempts}"); do
+  token="$(mint_token)" || exit 1
+  if [ -z "${token}" ]; then
+    echo "::error::az-refresh: the OIDC response carried no token." >&2
+    exit 1
+  fi
+  echo "::add-mask::${token}"
+
+  if err="$(az login --service-principal \
+              --username "${ARM_CLIENT_ID}" \
+              --tenant "${ARM_TENANT_ID}" \
+              --federated-token "${token}" \
+              --allow-no-subscriptions -o none 2>&1)"; then
+    unset token err
+    az account set --subscription "${ARM_SUBSCRIPTION_ID}"
+    echo "az session refreshed from a new GitHub OIDC token"
+    exit 0
+  fi
+  unset token
+  printf '%s\n' "${err}" | redact >&2
+  if [ "${attempt}" -lt "${attempts}" ]; then
+    echo "az-refresh: az login failed (attempt ${attempt}/${attempts}); retrying with a new token" >&2
+    sleep $((attempt * 5))
+  fi
+done
+
+echo "::error::az-refresh: az login failed ${attempts} times; the az session is still the stale one." >&2
+exit 1
