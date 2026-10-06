@@ -137,10 +137,16 @@ if [ -z "${SENTINEL_KUBELOGIN_LOG:-}" ]; then
 fi
 export SENTINEL_KUBELOGIN_LOG
 
+# Only invocations that finally FAILED are in the log (kubelogin.sh discards
+# the stderr of one its retry recovered). Redacted again here: an ::add-mask::
+# issued inside the exec plugin never reached the runner, so nothing else would
+# keep a JWT or a --federated-token value out of this public log.
 show_kubelogin_log() {
   [ -s "${SENTINEL_KUBELOGIN_LOG}" ] || return 0
   echo "──── kubelogin stderr (the kubernetes provider does not show it) ────" >&2
-  cat "${SENTINEL_KUBELOGIN_LOG}" >&2
+  sed -E -e 's/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/<redacted-jwt>/g' \
+         -e 's/(--federated-token[= ]+)[^ ]+/\1<redacted>/g' \
+         "${SENTINEL_KUBELOGIN_LOG}" >&2
   echo "──── end kubelogin stderr ────" >&2
 }
 
