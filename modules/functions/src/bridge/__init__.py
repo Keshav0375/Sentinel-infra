@@ -43,6 +43,23 @@ def _tags_blob(data: dict) -> str:
 
 
 def main(event: func.EventGridEvent) -> None:
+    # GITHUB_TOKEN is a Key Vault *reference* resolved by App Service via the
+    # function's system-assigned identity. When it cannot resolve (github-pat
+    # not seeded, enable_bridge_reader grant missing, or the app not restarted
+    # since), App Service hands over the LITERAL "@Microsoft.KeyVault(...)"
+    # string. Sent as a token it 401s, the raise fails the delivery, and Event
+    # Grid retries for 24h on what is a config gap, not a transient fault — so
+    # log it and return. A real token that 401s/5xxs still raises and retries.
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token or token.startswith("@Microsoft.KeyVault"):
+        log.error(
+            "bridge: GITHUB_TOKEN is %s — github-pat unseeded, bridge KV grant "
+            "missing, or app not restarted; event %s NOT dispatched",
+            "an unresolved Key Vault reference" if token else "empty",
+            getattr(event, "id", None),
+        )
+        return
+
     data = event.get_json() or {}
 
     signal_type = "deploy_failure" if "deploy_status:failed" in _tags_blob(data) else "runtime_error"
@@ -71,11 +88,7 @@ def main(event: func.EventGridEvent) -> None:
         f"https://api.github.com/repos/{os.environ['GITHUB_REPO']}/dispatches",
         data=json.dumps(payload).encode(),
         headers={
-            # GITHUB_TOKEN is a Key Vault *reference* resolved by App Service via
-            # the function's system-assigned identity. If it ever arrives empty,
-            # the vault grant (enable_bridge_reader) or the seeded secret (B9)
-            # is missing — not this code.
-            "Authorization": f"token {os.environ['GITHUB_TOKEN']}",
+            "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json",
             "Content-Type": "application/json",
         },

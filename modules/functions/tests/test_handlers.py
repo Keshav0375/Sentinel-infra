@@ -12,6 +12,7 @@ import json
 import sys
 import types
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -153,6 +154,37 @@ class BridgeTests(unittest.TestCase):
     def test_empty_event_still_dispatches_runtime_error(self):
         _, body = self._run({})
         self.assertEqual(body["client_payload"]["signal_type"], "runtime_error")
+
+    def _run_with_token(self, token, opener):
+        with mock.patch.dict("os.environ", self.env | {"GITHUB_TOKEN": token}, clear=False), \
+             mock.patch.object(self.bridge.urllib.request, "urlopen", opener):
+            self.bridge.main(_FakeEventGridEvent({"title": "x"}))
+
+    def test_unresolved_kv_reference_logs_and_does_not_dispatch(self):
+        # Unseeded github-pat (live 2026-10-07): App Service hands the app the
+        # LITERAL reference. Raising would make Event Grid retry for 24h on a
+        # config gap — so log an error, send nothing, return.
+        sent = []
+        with self.assertLogs(self.bridge.log, level="ERROR") as logs:
+            self._run_with_token("@Microsoft.KeyVault(VaultName=v;SecretName=github-pat)",
+                                 _CapturedRequest(sent))
+        self.assertEqual(sent, [], "must not call GitHub with the literal as a token")
+        self.assertIn("unresolved Key Vault reference", logs.output[0])
+
+    def test_empty_token_logs_and_does_not_dispatch(self):
+        sent = []
+        with self.assertLogs(self.bridge.log, level="ERROR"):
+            self._run_with_token("", _CapturedRequest(sent))
+        self.assertEqual(sent, [])
+
+    def test_real_http_error_still_raises_so_event_grid_retries(self):
+        # A real token that GitHub rejects (401) or a 5xx is not a config gap
+        # this code can see — it must raise so the delivery fails and retries.
+        def reject(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 401, "Bad credentials", {}, None)
+
+        with self.assertRaises(urllib.error.HTTPError):
+            self._run_with_token("github_pat_real", reject)
 
 
 class RotateTests(unittest.TestCase):
