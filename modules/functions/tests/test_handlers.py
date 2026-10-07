@@ -9,6 +9,7 @@ Run:  python -m unittest discover modules/functions/tests -v
 """
 import importlib.util
 import json
+import os
 import sys
 import types
 import unittest
@@ -155,27 +156,45 @@ class BridgeTests(unittest.TestCase):
         _, body = self._run({})
         self.assertEqual(body["client_payload"]["signal_type"], "runtime_error")
 
+    _UNSET = object()
+
     def _run_with_token(self, token, opener):
-        with mock.patch.dict("os.environ", self.env | {"GITHUB_TOKEN": token}, clear=False), \
+        """Run the bridge with GITHUB_TOKEN = token, or with it absent if _UNSET."""
+        env = self.env | ({} if token is self._UNSET else {"GITHUB_TOKEN": token})
+        with mock.patch.dict("os.environ", env, clear=False), \
              mock.patch.object(self.bridge.urllib.request, "urlopen", opener):
+            if token is self._UNSET:
+                # Inside patch.dict, so the caller's environment is restored after.
+                os.environ.pop("GITHUB_TOKEN", None)
             self.bridge.main(_FakeEventGridEvent({"title": "x"}))
+
+    def _assert_skipped(self, token, expect_in_log):
+        """The bridge must log an ERROR, send nothing, and never log the value."""
+        sent = []
+        with self.assertLogs(self.bridge.log, level="DEBUG") as logs:
+            self._run_with_token(token, _CapturedRequest(sent))
+        self.assertEqual(sent, [], "must not call GitHub without a usable token")
+        self.assertTrue(any(r.levelname == "ERROR" for r in logs.records), logs.output)
+        text = "\n".join(logs.output)
+        self.assertIn(expect_in_log, text)
+        self.assertNotIn("@Microsoft.KeyVault", text, "the reference string must not be logged")
+        if isinstance(token, str) and token:
+            self.assertNotIn(token, text, "the token value must not be logged")
 
     def test_unresolved_kv_reference_logs_and_does_not_dispatch(self):
         # Unseeded github-pat (live 2026-10-07): App Service hands the app the
         # LITERAL reference. Raising would make Event Grid retry for 24h on a
         # config gap — so log an error, send nothing, return.
-        sent = []
-        with self.assertLogs(self.bridge.log, level="ERROR") as logs:
-            self._run_with_token("@Microsoft.KeyVault(VaultName=v;SecretName=github-pat)",
-                                 _CapturedRequest(sent))
-        self.assertEqual(sent, [], "must not call GitHub with the literal as a token")
-        self.assertIn("unresolved Key Vault reference", logs.output[0])
+        self._assert_skipped("@Microsoft.KeyVault(VaultName=v;SecretName=github-pat)",
+                             "unresolved Key Vault reference")
 
     def test_empty_token_logs_and_does_not_dispatch(self):
-        sent = []
-        with self.assertLogs(self.bridge.log, level="ERROR"):
-            self._run_with_token("", _CapturedRequest(sent))
-        self.assertEqual(sent, [])
+        self._assert_skipped("", "empty or unset")
+
+    def test_unset_token_logs_and_does_not_dispatch(self):
+        # The app setting missing altogether (not just blank) — a KeyError
+        # here would fail every delivery exactly like the literal did.
+        self._assert_skipped(self._UNSET, "empty or unset")
 
     def test_real_http_error_still_raises_so_event_grid_retries(self):
         # A real token that GitHub rejects (401) or a 5xx is not a config gap

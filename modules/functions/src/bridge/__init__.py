@@ -55,7 +55,7 @@ def main(event: func.EventGridEvent) -> None:
         log.error(
             "bridge: GITHUB_TOKEN is %s — github-pat unseeded, bridge KV grant "
             "missing, or app not restarted; event %s NOT dispatched",
-            "an unresolved Key Vault reference" if token else "empty",
+            "an unresolved Key Vault reference" if token else "empty or unset",
             getattr(event, "id", None),
         )
         return
