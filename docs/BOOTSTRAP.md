@@ -130,7 +130,8 @@ Unset is tolerated rather than fatal: the plan skips the App Service grant, and 
 pipeline's deploy step is what fails, with `AuthorizationFailed`.
 
 There is no `AZURE_CLIENT_SECRET` (OIDC removes it), no `DB_PASSWORD` (Postgres is Entra-only),
-and no `GITHUB_`-prefixed name (GitHub reserves that prefix outright).
+and no `GITHUB_`-prefixed name (GitHub reserves that prefix outright) — which is why the
+bridge's PAT is the `production` secret `DISPATCH_PAT`, not `GITHUB_PAT` (step 8).
 
 ## Step 4 — Identity-tenant federated credentials (R4)
 
@@ -257,9 +258,51 @@ this needs no file edit. Add a block there only when a deployment must differ.
 ## Step 8 — Key Vault secrets, per deployment
 
 ⚠️ **Every deployment has its own vault, and every one ships empty.** The bridge reads
-`GITHUB_TOKEN` as a Key Vault reference, so until you seed it that reference resolves to the
-literal `@Microsoft.KeyVault(...)` string. The handlers detect that and log rather than crashing
-— a deployment with an unseeded vault is a *valid* state, it just cannot dispatch.
+`GITHUB_TOKEN` as a Key Vault reference to `github-pat`, so until you seed it that reference
+resolves to the literal `@Microsoft.KeyVault(...)` string. The bridge detects that, logs an
+error naming the event, and returns without dispatching — so Event Grid records a *successful*
+delivery and does not retry for 24 h on a config gap. A deployment with an unseeded vault is a
+*valid* state, but it cannot dispatch: every Datadog alert stops at the bridge. (Before
+2026-10-07 the bridge sent the literal as a token, GitHub 401'd, and every alert showed up as
+`DeliveryAttemptFailCount` / `GenericError` on the subscription.)
+
+### The dispatch PAT (`github-pat`)
+
+The bridge's only credential, used for `repository_dispatch` on the app repo.
+
+| Setting | Value |
+|---|---|
+| Type | fine-grained personal access token |
+| Repository access | **only** `Keshav0375/Sentinel` |
+| Permissions | **Contents: Read and write** (what `repository_dispatch` requires) — nothing else |
+| Expiry | 90 days |
+| GitHub secret | `DISPATCH_PAT`, an environment secret on `production` in `Sentinel-infra` |
+| `.env` key | `DISPATCH_PAT` |
+| Key Vault secret | `github-pat` |
+
+**Why the name changes on the way in.** GitHub rejects any secret name starting with
+`GITHUB_` (step 3), so the GitHub secret cannot be `GITHUB_PAT`. The *Seed the vault* step maps
+it, `GITHUB_PAT: ${{ secrets.DISPATCH_PAT }}`, and `scripts/seed-vault.sh` derives the vault
+name from `GITHUB_PAT` the usual mechanical way, giving `github-pat`, which is exactly what
+`modules/functions` references.
+
+**Expiry — the vault's date is NOT the PAT's date.** The seed sets `github-pat`'s Key Vault
+expiry to 90 days after *it writes the secret*, the same as every other secret, and renews that
+date on any apply within 30 days of it. None of that tracks or extends the PAT's real expiry,
+which GitHub set when you minted it. Nothing watches it either: the vault raises
+`SecretNearExpiry`, but the rotation Function rotates only the LLM keys and ignores
+`github-pat`.
+
+⚠️ **A dead PAT fails loudly, but only in Azure.** Once GitHub expires or revokes it, the token
+is real but rejected: every Datadog alert gets a 401 from `repository_dispatch`, the bridge
+raises, and Event Grid retries each one for 24 h (`DeliveryAttemptFailCount` on the
+subscription). No incident reaches the backend in that window. Track the PAT's expiry yourself.
+To renew, mint a new PAT, update `DISPATCH_PAT`, then delete `github-pat` from the vault (or
+`az keyvault secret set` it by hand) before re-running apply. The seed skips a secret whose
+vault expiry is more than 30 days away, so a re-run alone keeps the old PAT.
+
+Locally, `scripts/seed-vault.sh` reads `DISPATCH_PAT` first and falls back to `GITHUB_PAT`, so a
+broad `GITHUB_PAT` exported in your shell for other tools never ends up in the vault.
 
 **This is now automatic.** The deploy workflow's *Seed the vault* step writes these from the
 GitHub `production` environment secrets after every apply, so a destroy → recreate cycle comes
@@ -291,6 +334,7 @@ az keyvault secret set --vault-name <kv> --name datadog-app-key     --value <...
 az keyvault secret set --vault-name <kv> --name langfuse-public-key --value <...> --expires <+90d>
 az keyvault secret set --vault-name <kv> --name langfuse-secret-key --value <...> --expires <+90d>
 az keyvault secret set --vault-name <kv> --name teams-webhook-url   --value <...> --expires <+90d>
+az keyvault secret set --vault-name <kv> --name github-pat          --value <...> --expires <+90d>
 ```
 
 Set `--expires` on every one. The rotation Function watches `SecretNearExpiry`; a secret with no

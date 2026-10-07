@@ -401,6 +401,9 @@ jobs:
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          # Seeds github-pat, the bridge's GITHUB_TOKEN. The secret is DISPATCH_PAT
+          # because GitHub forbids secret names starting with GITHUB_.
+          GITHUB_PAT: ${{ secrets.DISPATCH_PAT }}
         run: |
           if [ -z "${VAULT}" ]; then
             echo "::warning::no Key Vault in this deployment — nothing to seed"

@@ -50,7 +50,17 @@ SECRETS=(
   LANGFUSE_SECRET_KEY
   LANGFUSE_BASE_URL
   TEAMS_WEBHOOK_URL
+  GITHUB_PAT
 )
+
+# GITHUB_PAT -> github-pat is the bridge Function's GITHUB_TOKEN Key Vault
+# reference (modules/functions). GitHub forbids a secret NAME starting with
+# GITHUB_, so the GitHub environment secret (and the .env key that feeds it) is
+# DISPATCH_PAT; the workflow maps it onto GITHUB_PAT in the step env. Locally,
+# DISPATCH_PAT (from a sourced .env) WINS: a broad GITHUB_PAT a developer has
+# exported for other tools must never be what lands in the vault. In CI only
+# GITHUB_PAT is set, so it is used there.
+GITHUB_PAT="${DISPATCH_PAT:-${GITHUB_PAT:-}}"
 
 # Deliberately absent: ANTHROPIC_API_KEY and OPENAI_API_KEY. Both vendors support
 # workload identity federation, so the backend pod authenticates with its
@@ -187,8 +197,9 @@ if [ "${skip_missing}" -gt 0 ]; then
   for name in "${missing_names[@]}"; do echo "  - ${name}"; done
   echo
   echo "A Key Vault reference to a missing secret resolves to the literal"
-  echo "@Microsoft.KeyVault(...) string, which the handlers detect and log rather"
-  echo "than crash on. Add the value as a GitHub environment secret on"
-  echo "'production' and re-run apply; this step adds what is newly available and"
-  echo "leaves everything else alone."
+  echo "@Microsoft.KeyVault(...) string. The bridge and rotator detect it, log an"
+  echo "error and return without dispatching or notifying — nothing crashes, but"
+  echo "a missing github-pat means NO alert reaches GitHub. Add the value as a"
+  echo "GitHub environment secret on 'production' and re-run apply; this step"
+  echo "adds what is newly available and leaves everything else alone."
 fi
