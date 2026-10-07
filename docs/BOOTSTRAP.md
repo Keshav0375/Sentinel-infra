@@ -284,13 +284,25 @@ The bridge's only credential, used for `repository_dispatch` on the app repo.
 `GITHUB_` (step 3), so the GitHub secret cannot be `GITHUB_PAT`. The *Seed the vault* step maps
 it, `GITHUB_PAT: ${{ secrets.DISPATCH_PAT }}`, and `scripts/seed-vault.sh` derives the vault
 name from `GITHUB_PAT` the usual mechanical way, giving `github-pat`, which is exactly what
-`modules/functions` references. Run locally from a sourced `.env`, the script falls back to
-`DISPATCH_PAT` itself.
+`modules/functions` references.
 
-**Expiry.** The seed step re-writes `github-pat` with a fresh 90-day expiry on any apply within
-30 days of it expiring, and the vault raises `SecretNearExpiry` for it. The rotation Function
-receives that event but rotates only the LLM keys — it ignores `github-pat`. So renewal is
-manual: mint a new PAT, update `DISPATCH_PAT`, re-run apply.
+**Expiry — the vault's date is NOT the PAT's date.** The seed sets `github-pat`'s Key Vault
+expiry to 90 days after *it writes the secret*, the same as every other secret, and renews that
+date on any apply within 30 days of it. None of that tracks or extends the PAT's real expiry,
+which GitHub set when you minted it. Nothing watches it either: the vault raises
+`SecretNearExpiry`, but the rotation Function rotates only the LLM keys and ignores
+`github-pat`.
+
+⚠️ **A dead PAT fails loudly, but only in Azure.** Once GitHub expires or revokes it, the token
+is real but rejected: every Datadog alert gets a 401 from `repository_dispatch`, the bridge
+raises, and Event Grid retries each one for 24 h (`DeliveryAttemptFailCount` on the
+subscription). No incident reaches the backend in that window. Track the PAT's expiry yourself.
+To renew, mint a new PAT, update `DISPATCH_PAT`, then delete `github-pat` from the vault (or
+`az keyvault secret set` it by hand) before re-running apply. The seed skips a secret whose
+vault expiry is more than 30 days away, so a re-run alone keeps the old PAT.
+
+Locally, `scripts/seed-vault.sh` reads `DISPATCH_PAT` first and falls back to `GITHUB_PAT`, so a
+broad `GITHUB_PAT` exported in your shell for other tools never ends up in the vault.
 
 **This is now automatic.** The deploy workflow's *Seed the vault* step writes these from the
 GitHub `production` environment secrets after every apply, so a destroy → recreate cycle comes

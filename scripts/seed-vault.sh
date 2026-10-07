@@ -56,9 +56,11 @@ SECRETS=(
 # GITHUB_PAT -> github-pat is the bridge Function's GITHUB_TOKEN Key Vault
 # reference (modules/functions). GitHub forbids a secret NAME starting with
 # GITHUB_, so the GitHub environment secret (and the .env key that feeds it) is
-# DISPATCH_PAT; the workflow maps it onto GITHUB_PAT in the step env. A sourced
-# .env carries DISPATCH_PAT only, so fall back to it here.
-GITHUB_PAT="${GITHUB_PAT:-${DISPATCH_PAT:-}}"
+# DISPATCH_PAT; the workflow maps it onto GITHUB_PAT in the step env. Locally,
+# DISPATCH_PAT (from a sourced .env) WINS: a broad GITHUB_PAT a developer has
+# exported for other tools must never be what lands in the vault. In CI only
+# GITHUB_PAT is set, so it is used there.
+GITHUB_PAT="${DISPATCH_PAT:-${GITHUB_PAT:-}}"
 
 # Deliberately absent: ANTHROPIC_API_KEY and OPENAI_API_KEY. Both vendors support
 # workload identity federation, so the backend pod authenticates with its
